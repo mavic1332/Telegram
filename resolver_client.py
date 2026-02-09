@@ -14,6 +14,7 @@ BOT_A = '@Botfindinformation_bot'
 BOT_B = '@WOW_MYAI_BOT'
 BOT_A_ID = 8585975791
 MAX_BOT_WAIT_S = 180
+BOT_A_SOFT_TIMEOUT_S = 5
 WAIT_UNTIL_RE = re.compile(r'new\s+requests\s+will\s+be\s+granted\s+at\s*(\d{1,2}:\d{2})', re.IGNORECASE)
 COUNTDOWN_RE = re.compile(r'\b(\d{2}:\d{2})\b')
 ProgressCb = Optional[Callable[[str], Awaitable[None]]]
@@ -44,7 +45,7 @@ class ResolverClient:
             text_b, sec_b = await self._query_wow(target, progress_cb=progress_cb)
             return RawBotResponses(wow_myai=text_b, bot_b_seconds=sec_b)
 
-        task_a = asyncio.create_task(self._query_botfind(target, progress_cb=progress_cb))
+        task_a = asyncio.create_task(asyncio.wait_for(self._query_botfind(target, progress_cb=progress_cb), timeout=BOT_A_SOFT_TIMEOUT_S))
         task_b = asyncio.create_task(self._query_wow(target, progress_cb=progress_cb))
 
         text_a, wait_a, retry_after, sec_a = ('Timeout su Bot A.', None, None, None)
@@ -59,6 +60,8 @@ class ResolverClient:
                 try:
                     result = completed.result()
                 except Exception:
+                    if completed is task_a:
+                        text_a, wait_a, retry_after, sec_a = ('Timeout su Bot A.', None, None, BOT_A_SOFT_TIMEOUT_S)
                     continue
 
                 if completed is task_a:

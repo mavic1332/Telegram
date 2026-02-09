@@ -58,14 +58,25 @@ def _extract_bot_b_id(text: str) -> Optional[str]:
 
 
 def _extract_bot_b_registered(text: str) -> Optional[str]:
-    match = re.search(r'(?is)Registered\s*\n\s*(.*?)(?:\n\s*🤖\s*Bots\b|$)', text)
-    if not match:
-        return None
-    block = match.group(1)
-    lines = [ln.strip() for ln in re.split(r'\r?\n', block) if ln.strip()]
-    if not lines:
-        return None
-    return _to_it_month(', '.join(lines))
+    key_match = re.search(r'(?im)^\s*🔑\s*([^\n\r🤖]+)', text)
+    if key_match:
+        value = key_match.group(1).strip()
+        if value and 'search by telegram id' not in value.lower():
+            return _to_it_month(value)
+
+    reg_inline = re.search(r'(?im)^\s*Registered\s*[:\-]?\s*([^\n\r🤖]+)', text)
+    if reg_inline:
+        value = reg_inline.group(1).strip()
+        if value and 'search by telegram id' not in value.lower():
+            return _to_it_month(value)
+
+    reg_next = re.search(r'(?is)Registered\s*\n\s*([^\n\r🤖]+)', text)
+    if reg_next:
+        value = reg_next.group(1).strip()
+        if value and 'search by telegram id' not in value.lower():
+            return _to_it_month(value)
+
+    return None
 
 
 def _extract_bot_b_bots_summary(text: str) -> list[str]:
