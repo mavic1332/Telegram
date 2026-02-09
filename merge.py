@@ -4,11 +4,6 @@ from typing import List, Optional
 from models import RawBotResponses, SearchResult
 
 CYRILLIC_WORD_RE = re.compile(r'[а-яА-Я]+')
-HEADER_ID_RE = re.compile(
-    r'Search\s+by\s+Telegram\s+ID[^\d]*(\d{7,10})',
-    flags=re.IGNORECASE,
-)
-REGISTERED_RE = re.compile(r'Registered\s*[:\]]?\s*([^\n\r]+)', flags=re.IGNORECASE)
 MONTH_IT = {
     'january': 'Gennaio',
     'february': 'Febbraio',
@@ -50,26 +45,31 @@ def _translate_registered(value: str) -> str:
 
 def _extract_bot_b(raw_b: str) -> tuple[Optional[str], Optional[str], List[str]]:
     text = _strip_noise(raw_b)
-    found_id = None
-    registered = None
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+    found_id: Optional[str] = None
+    registered: Optional[str] = None
     history: List[str] = []
 
-    m_id = HEADER_ID_RE.search(text)
-    if m_id:
-        found_id = m_id.group(1)
+    for i, line in enumerate(lines):
+        lower = line.lower()
 
-    m_reg = REGISTERED_RE.search(text)
-    if m_reg:
-        registered = _translate_registered(m_reg.group(1))
+        if 'search by telegram id' in lower and not found_id:
+            match = re.search(r'(\d{7,10})\D*$', line)
+            if match:
+                found_id = match.group(1)
+            continue
 
-    for line in text.splitlines():
-        line = line.strip('•- \t')
-        if not line:
+        if 'registered' in lower and not registered:
+            inline = line.split('Registered', 1)[1].strip(' :[]') if 'Registered' in line else ''
+            if inline:
+                registered = _translate_registered(inline)
+            elif i + 1 < len(lines):
+                registered = _translate_registered(lines[i + 1])
             continue
-        low = line.lower()
-        if 'search by telegram id' in low or 'registered' in low:
-            continue
+
         history.append(line)
+
     return found_id, registered, history
 
 

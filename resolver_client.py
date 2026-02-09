@@ -12,6 +12,7 @@ from models import RawBotResponses
 
 BOT_A = '@Botfindinformation_bot'
 BOT_B = '@WOW_MYAI_BOT'
+MAX_BOT_WAIT_S = 120
 WAIT_UNTIL_RE = re.compile(r'new\s+requests\s+will\s+be\s+granted\s+at\s*(\d{1,2}:\d{2})', re.IGNORECASE)
 COUNTDOWN_RE = re.compile(r'\b(\d{2}:\d{2})\b')
 
@@ -61,7 +62,7 @@ class ResolverClient:
     async def _query_botfind(self, target: str) -> Tuple[str, Optional[str], Optional[str], float]:
         started = time.perf_counter()
         try:
-            async with self.client.conversation(BOT_A, timeout=50) as conv:
+            async with self.client.conversation(BOT_A, timeout=MAX_BOT_WAIT_S) as conv:
                 await conv.send_message(target)
                 first = await conv.get_response()
                 first_text = first.raw_text or ''
@@ -114,7 +115,7 @@ class ResolverClient:
 
         try:
             entity = await self.client.get_entity(BOT_B)
-            async with self.client.conversation(entity, timeout=60) as conv:
+            async with self.client.conversation(entity, timeout=MAX_BOT_WAIT_S) as conv:
                 await conv.send_message(target)
 
                 def on_edited(event: events.MessageEdited.Event) -> None:
@@ -126,7 +127,7 @@ class ResolverClient:
                 self.client.add_event_handler(on_edited, event_filter)
                 try:
                     await conv.get_response()
-                    result = await asyncio.wait_for(done_future, timeout=60)
+                    result = await asyncio.wait_for(done_future, timeout=MAX_BOT_WAIT_S)
                     return result, time.perf_counter() - started
                 finally:
                     self.client.remove_event_handler(on_edited, event_filter)

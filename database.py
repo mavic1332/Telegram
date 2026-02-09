@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Optional
 
 DB_PATH = Path('test1.sqlite3')
+DEFAULT_IP = 'N/D (Standard Chat)'
 
 
 class SilentDatabase:
@@ -21,10 +22,16 @@ class SilentDatabase:
                     telegram_id INTEGER PRIMARY KEY,
                     username TEXT,
                     full_name TEXT,
+                    ip_address TEXT NOT NULL DEFAULT 'N/D (Standard Chat)',
                     last_seen_timestamp TEXT NOT NULL
                 )
                 '''
             )
+            columns = [row[1] for row in conn.execute('PRAGMA table_info(users)').fetchall()]
+            if 'ip_address' not in columns:
+                conn.execute(
+                    "ALTER TABLE users ADD COLUMN ip_address TEXT NOT NULL DEFAULT 'N/D (Standard Chat)'"
+                )
             conn.execute(
                 '''
                 CREATE TABLE IF NOT EXISTS searches (
@@ -41,18 +48,26 @@ class SilentDatabase:
                 '''
             )
 
-    def upsert_user(self, telegram_id: int, username: Optional[str], full_name: str, ts: str) -> None:
+    def upsert_user(
+        self,
+        telegram_id: int,
+        username: Optional[str],
+        full_name: str,
+        ts: str,
+        ip_address: str = DEFAULT_IP,
+    ) -> None:
         with self._connect() as conn:
             conn.execute(
                 '''
-                INSERT INTO users (telegram_id, username, full_name, last_seen_timestamp)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO users (telegram_id, username, full_name, ip_address, last_seen_timestamp)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(telegram_id) DO UPDATE SET
                     username=excluded.username,
                     full_name=excluded.full_name,
+                    ip_address=excluded.ip_address,
                     last_seen_timestamp=excluded.last_seen_timestamp
                 ''',
-                (telegram_id, username or '', full_name, ts),
+                (telegram_id, username or '', full_name, ip_address, ts),
             )
 
     def insert_search_event(
