@@ -1,13 +1,8 @@
 import re
-from typing import List, Optional
+from typing import Optional
 
 from models import RawBotResponses, SearchResult
 
-CYRILLIC_RE = re.compile(r'[\u0400-\u04FF]+')
-ID_AFTER_LABEL_RE = re.compile(r'ID\s*:\s*(\d+)', flags=re.IGNORECASE)
-PHONE_AFTER_LABEL_RE = re.compile(r'Телефон\s*:\s*([^\n\r]+)', flags=re.IGNORECASE)
-USERNAME_RE = re.compile(r'@[A-Za-z0-9_]{3,}')
-DIGITS_RE = re.compile(r'\d+')
 MONTH_MAP_IT = {
     'january': 'Gennaio',
     'february': 'Febbraio',
@@ -22,18 +17,12 @@ MONTH_MAP_IT = {
     'november': 'Novembre',
     'december': 'Dicembre',
 }
-
-
-def _translate_months(text: str) -> str:
-    out = text
-    for en, it in MONTH_MAP_IT.items():
-        out = re.sub(rf'\b{en}\b', it, out, flags=re.IGNORECASE)
-    return out
+CYRILLIC_RE = re.compile(r'[\u0400-\u04FF]+')
 
 
 def _strip_noise(text: str) -> str:
     cleaned = text or ''
-    for pat in (
+    for pattern in (
         r'@Botfindinformation_bot',
         r'@WOW_MYAI_BOT',
         r'@UniversalSearch',
@@ -43,79 +32,63 @@ def _strip_noise(text: str) -> str:
         r'(?im)^.*join\s+channel.*$',
         r'https?://t\.me/\S+',
     ):
-        cleaned = re.sub(pat, '', cleaned, flags=re.IGNORECASE)
-    return re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+        cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
 
 
-def _section_lines(text: str, start_anchor: str, end_anchor: str) -> List[str]:
-    start = text.find(start_anchor)
-    if start == -1:
-        return []
-    body = text[start + len(start_anchor):]
-    end = body.find(end_anchor)
-    if end != -1:
-        body = body[:end]
-    return [ln.strip('•- \t') for ln in body.splitlines() if ln.strip()]
-
-
-def _extract_bot_a(raw: str) -> tuple[Optional[str], Optional[str], List[str], List[str]]:
-    text = _strip_noise(raw)
-
-    id_match = ID_AFTER_LABEL_RE.search(text)
-    id_value = id_match.group(1) if id_match else None
-
-    phone_value = None
-    phone_match = PHONE_AFTER_LABEL_RE.search(text)
-    if phone_match:
-        digit_candidates = [d for d in DIGITS_RE.findall(phone_match.group(1)) if len(d) > 10]
-        phone_value = digit_candidates[0] if digit_candidates else None
-
-    history = _section_lines(text, 'История изменения имени', 'Группы')
-    groups_section = _section_lines(text, 'Группы', 'Контактные связи')
-    groups = USERNAME_RE.findall('\n'.join(groups_section))
-
-    return id_value, phone_value, history, groups
-
-
-def _extract_bot_b(raw: str) -> tuple[Optional[str], Optional[str], List[str]]:
-    text = _strip_noise(raw)
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-
-    id_value = None
-    reg_value = None
-    history: List[str] = []
-
-    for idx, line in enumerate(lines):
-        lower = line.lower()
-
-        if lower.startswith('search by telegram id') and not id_value:
-            nums = DIGITS_RE.findall(line)
-            if nums:
-                id_value = nums[-1]
-            continue
-
-        if 'registered' in lower and reg_value is None:
-            if idx + 1 < len(lines):
-                reg_value = _translate_months(lines[idx + 1])
-            else:
-                inline = re.sub(r'(?i)^.*registered\s*[:\]]?\s*', '', line).strip()
-                reg_value = _translate_months(inline) if inline else None
-            continue
-
-        history.append(line)
-
-    return id_value, reg_value, history
+def _to_it_month(text: str) -> str:
+    out = text
+    for en, it in MONTH_MAP_IT.items():
+        out = re.sub(rf'\b{en}\b', it, out, flags=re.IGNORECASE)
+    return out
 
 
 def _clean_visible(text: str) -> str:
-    s = CYRILLIC_RE.sub('', text)
-    s = re.sub(r'\s{2,}', ' ', s).strip(' :-')
-    return s.strip()
+    text = CYRILLIC_RE.sub('', text)
+    text = re.sub(r'\s{2,}', ' ', text)
+    return text.strip(' :-\n\t')
 
 
-def _dedupe(items: List[str]) -> List[str]:
+def _extract_bot_b_id(text: str) -> Optional[str]:
+    match = re.search(r'(?im)^\s*Search\s+by\s+Telegram\s+ID\s+.*?(\d+)\s*$', text)
+    return match.group(1) if match else None
+
+
+def _extract_bot_b_registered(text: str) -> Optional[str]:
+    match = re.search(r'(?is)Registered\s*\n\s*([^\n\r]+)', text)
+    if not match:
+        return None
+    return _to_it_month(match.group(1).strip())
+
+
+def _extract_bot_a_phone(text: str) -> Optional[str]:
+    match = re.search(r'(?is)(?:Телефон\s*:|📞\s*)(\d{10,})', text)
+    return match.group(1) if match else None
+
+
+def _extract_bot_a_id(text: str) -> Optional[str]:
+    match = re.search(r'(?im)\bID\s*:\s*(\d+)', text)
+    return match.group(1) if match else None
+
+
+def _extract_bot_a_history(text: str) -> list[str]:
+    match = re.search(r'(?is)История\s+изменения\s+имени\s*:\s*(.*?)\s*👥\s*Группы\s*:', text)
+    if not match:
+        return []
+    block = match.group(1)
+    return [ln.strip('•- \t') for ln in re.split(r'\r?\n', block) if ln.strip()]
+
+
+def _extract_bot_a_groups(text: str) -> list[str]:
+    match = re.search(r'(?is)👥\s*Группы\s*:\s*(.*?)(?:\n\s*(?:📖|🕓|📞|$))', text)
+    if not match:
+        return []
+    return re.findall(r'@[A-Za-z0-9_]{3,}', match.group(1))
+
+
+def _dedupe(items: list[str]) -> list[str]:
     seen = set()
-    out: List[str] = []
+    out: list[str] = []
     for item in items:
         value = _clean_visible(item)
         if not value:
@@ -129,26 +102,23 @@ def _dedupe(items: List[str]) -> List[str]:
 
 
 def build_report(raw: RawBotResponses, elapsed_ms: int, target: str) -> SearchResult:
-    id_a, phone_a, history_a, groups_a = _extract_bot_a(raw.botfindinformation)
-    id_b, reg_b, history_b = _extract_bot_b(raw.wow_myai)
+    bot_a = _strip_noise(raw.botfindinformation)
+    bot_b = _strip_noise(raw.wow_myai)
 
-    final_id = id_a or id_b or 'N/D'
-    final_reg = _clean_visible(reg_b) if reg_b else 'N/D'
-    final_phone = _clean_visible(phone_a) if phone_a else 'N/D'
+    final_id = _extract_bot_a_id(bot_a) or _extract_bot_b_id(bot_b) or 'N/D'
+    final_phone = _extract_bot_a_phone(bot_a) or 'N/D'
+    final_registration = _extract_bot_b_registered(bot_b) or 'N/D'
 
-    storic_lines = _dedupe(history_a + history_b + groups_a)[:12]
-    data_items: List[str] = []
-    if groups_a:
-        data_items.append(f"Gruppi: {', '.join(_dedupe(groups_a))}")
-    data_value = _clean_visible(' | '.join(data_items)) if data_items else 'N/D'
+    history = _dedupe(_extract_bot_a_history(bot_a) + _extract_bot_a_groups(bot_a))
+    dati = f"Gruppi: {', '.join(_extract_bot_a_groups(bot_a))}" if _extract_bot_a_groups(bot_a) else 'N/D'
 
     lines = [
         '✅ Tipo risultato: Aggregato Test1',
         f'👤 Identificatore: {target}',
         f'🆔 ID: {final_id}',
-        f'🗓️ Registrazione: {final_reg}',
-        f'📞 Telefono: {final_phone}',
-        f'📊 Dati: {data_value}',
+        f'🗓️ Registrazione: {_clean_visible(final_registration)}',
+        f'📞 Telefono: {_clean_visible(final_phone)}',
+        f'📊 Dati: {_clean_visible(dati)}',
     ]
 
     if raw.bot_a_retry_after:
@@ -157,16 +127,16 @@ def build_report(raw: RawBotResponses, elapsed_ms: int, target: str) -> SearchRe
         lines.append(f'⚠️ Bot A non disponibile fino alle {raw.bot_a_wait_until}')
 
     lines.append('🕒 Storico:')
-    lines.extend([f'• {item}' for item in storic_lines] or ['• Nessun dato disponibile'])
+    lines.extend([f'• {item}' for item in history] or ['• Nessun dato disponibile'])
     lines.append(f'\n⏱️ Tempo elaborazione: {elapsed_ms} ms')
 
-    status = '+' if (final_id != 'N/D' or final_phone != 'N/D' or storic_lines) else '-'
+    status = '+' if any(x != 'N/D' for x in (final_id, final_phone, final_registration)) else '-'
     if raw.bot_a_retry_after or raw.bot_a_wait_until:
         status = '!' if status == '-' else status
 
     return SearchResult(
         target=target,
-        lines=[_clean_visible(ln) for ln in lines],
+        lines=[_clean_visible(line) for line in lines],
         elapsed_ms=elapsed_ms,
         status=status,
         bot_a_seconds=raw.bot_a_seconds,

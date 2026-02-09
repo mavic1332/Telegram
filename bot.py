@@ -1,5 +1,4 @@
 import asyncio
-import contextlib
 import logging
 
 from aiogram import Bot, Dispatcher, F
@@ -53,23 +52,27 @@ async def _run_with_progress(
 ) -> None:
     progress = await message.answer('Elaborazione in corso... 0%')
 
-    async def animate() -> None:
-        for percent in (10, 25, 50, 75, 90):
-            await asyncio.sleep(0.5)
-            await progress.edit_text(f'Elaborazione in corso... {percent}%')
+    last_percent = 0
 
-    animation_task = asyncio.create_task(animate())
+    async def progress_cb(stage: str) -> None:
+        nonlocal last_percent
+        stage_map = {
+            'bot_a': 50,
+            'bot_b': 90,
+            'parsed': 100,
+        }
+        pct = stage_map.get(stage)
+        if pct is None or pct <= last_percent:
+            return
+        last_percent = pct
+        await progress.edit_text(f'Elaborazione in corso... {pct}%')
+
     started = asyncio.get_running_loop().time()
-    try:
-        result = await pipeline.run(target, mode=mode)
-    finally:
-        animation_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await animation_task
-
+    result = await pipeline.run(target, mode=mode, progress_cb=progress_cb)
     total_s = asyncio.get_running_loop().time() - started
 
-    await progress.edit_text('Elaborazione in corso... 100%')
+    if last_percent < 100:
+        await progress_cb('parsed')
     await message.answer('\n'.join(result.lines), reply_markup=_result_keyboard(target))
 
     logging.info(f"[{ts_hms()}] [USER: {_username(message)}] searched for: [{target}]")

@@ -2,7 +2,7 @@ import asyncio
 import re
 import time
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Awaitable, Callable, Optional, Tuple
 
 from telethon import TelegramClient, events
 from telethon.errors import ChatWriteForbiddenError, FloodWaitError, UserIsBlockedError
@@ -15,6 +15,7 @@ BOT_B = '@WOW_MYAI_BOT'
 MAX_BOT_WAIT_S = 180
 WAIT_UNTIL_RE = re.compile(r'new\s+requests\s+will\s+be\s+granted\s+at\s*(\d{1,2}:\d{2})', re.IGNORECASE)
 COUNTDOWN_RE = re.compile(r'\b(\d{2}:\d{2})\b')
+ProgressCb = Optional[Callable[[str], Awaitable[None]]]
 
 
 @dataclass
@@ -33,41 +34,50 @@ class ResolverClient:
     async def stop(self) -> None:
         await self.client.disconnect()
 
-    async def fetch_info(self, target: str, mode: str = 'all') -> RawBotResponses:
+    async def fetch_info(self, target: str, mode: str = 'all', progress_cb: ProgressCb = None) -> RawBotResponses:
         if mode == 'bot_a':
             text_a, wait_a, retry_after, sec_a = await self._query_botfind(target)
-            return RawBotResponses(
-                botfindinformation=text_a,
-                bot_a_wait_until=wait_a,
-                bot_a_retry_after=retry_after,
-                bot_a_seconds=sec_a,
-            )
+            if progress_cb:
+                await progress_cb('bot_a')
+            return RawBotResponses(botfindinformation=text_a, bot_a_wait_until=wait_a, bot_a_retry_after=retry_after, bot_a_seconds=sec_a)
         if mode == 'bot_b':
             text_b, sec_b = await self._query_wow(target)
+            if progress_cb:
+                await progress_cb('bot_b')
             return RawBotResponses(wow_myai=text_b, bot_b_seconds=sec_b)
 
-        results = await asyncio.gather(
-            self._query_botfind(target),
-            self._query_wow(target),
-            return_exceptions=True,
-        )
-
-        bot_a_result = results[0]
-        bot_b_result = results[1]
+        task_a = asyncio.create_task(self._query_botfind(target))
+        task_b = asyncio.create_task(self._query_wow(target))
 
         text_a, wait_a, retry_after, sec_a = ('Timeout su Bot A.', None, None, None)
         text_b, sec_b = ('Timeout su Bot B.', None)
 
-        if isinstance(bot_a_result, Exception):
-            text_a = f'Errore Bot A: {bot_a_result}'
-        else:
-            text_a, wait_a, retry_after, sec_a = bot_a_result
+        pending = {task_a, task_b}
+        while pending:
+            done, pending = await asyncio.wait(pending, timeout=MAX_BOT_WAIT_S, return_when=asyncio.FIRST_COMPLETED)
+            if not done:
+                break
+            for completed in done:
+                try:
+                    result = completed.result()
+                except Exception:
+                    continue
 
-        if isinstance(bot_b_result, Exception):
-            text_b = f'Errore Bot B: {bot_b_result}'
-        else:
-            text_b, sec_b = bot_b_result
+                if completed is task_a:
+                    text_a, wait_a, retry_after, sec_a = result
+                    if progress_cb:
+                        await progress_cb('bot_a')
+                elif completed is task_b:
+                    text_b, sec_b = result
+                    if progress_cb:
+                        await progress_cb('bot_b')
 
+            if task_a.done() and task_b.done():
+                break
+
+        for task in (task_a, task_b):
+            if not task.done():
+                task.cancel()
         return RawBotResponses(
             botfindinformation=text_a,
             wow_myai=text_b,
@@ -90,7 +100,6 @@ class ResolverClient:
                 if wait_until or retry_after:
                     return '', wait_until, retry_after, time.perf_counter() - started
 
-                # Early exit: if payload already contains ID marker, don't wait for full timeout.
                 if self._has_id_marker(first_text):
                     return first_text, None, None, time.perf_counter() - started
 
