@@ -1,5 +1,6 @@
 import asyncio
 import re
+import time
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -12,6 +13,7 @@ from models import RawBotResponses
 BOT_A = '@Botfindinformation_bot'
 BOT_B = '@WOW_MYAI_BOT'
 WAIT_UNTIL_RE = re.compile(r'new\s+requests\s+will\s+be\s+granted\s+at\s*(\d{1,2}:\d{2})', re.IGNORECASE)
+COUNTDOWN_RE = re.compile(r'\b(\d{2}:\d{2})\b')
 
 
 @dataclass
@@ -32,19 +34,32 @@ class ResolverClient:
 
     async def fetch_info(self, target: str, mode: str = 'all') -> RawBotResponses:
         if mode == 'bot_a':
-            text_a, wait_a = await self._query_botfind(target)
-            return RawBotResponses(botfindinformation=text_a, bot_a_wait_until=wait_a)
+            text_a, wait_a, retry_after, sec_a = await self._query_botfind(target)
+            return RawBotResponses(
+                botfindinformation=text_a,
+                bot_a_wait_until=wait_a,
+                bot_a_retry_after=retry_after,
+                bot_a_seconds=sec_a,
+            )
         if mode == 'bot_b':
-            text_b = await self._query_wow(target)
-            return RawBotResponses(wow_myai=text_b)
+            text_b, sec_b = await self._query_wow(target)
+            return RawBotResponses(wow_myai=text_b, bot_b_seconds=sec_b)
 
-        (text_a, wait_a), text_b = await asyncio.gather(
+        (text_a, wait_a, retry_after, sec_a), (text_b, sec_b) = await asyncio.gather(
             self._query_botfind(target),
             self._query_wow(target),
         )
-        return RawBotResponses(botfindinformation=text_a, wow_myai=text_b, bot_a_wait_until=wait_a)
+        return RawBotResponses(
+            botfindinformation=text_a,
+            wow_myai=text_b,
+            bot_a_wait_until=wait_a,
+            bot_a_retry_after=retry_after,
+            bot_a_seconds=sec_a,
+            bot_b_seconds=sec_b,
+        )
 
-    async def _query_botfind(self, target: str) -> Tuple[str, Optional[str]]:
+    async def _query_botfind(self, target: str) -> Tuple[str, Optional[str], Optional[str], float]:
+        started = time.perf_counter()
         try:
             async with self.client.conversation(BOT_A, timeout=50) as conv:
                 await conv.send_message(target)
@@ -52,31 +67,36 @@ class ResolverClient:
                 first_text = first.raw_text or ''
 
                 wait_until = self._extract_wait_time(first_text)
-                if wait_until:
-                    return '', wait_until
+                retry_after = self._extract_countdown(first_text)
+                if wait_until or retry_after:
+                    return '', wait_until, retry_after, time.perf_counter() - started
 
                 await self._click_telegram_button(first)
                 final = await conv.get_response()
                 final_text = final.raw_text or first_text
                 wait_until = self._extract_wait_time(final_text)
-                if wait_until:
-                    return '', wait_until
-                return final_text, None
+                retry_after = self._extract_countdown(final_text)
+                if wait_until or retry_after:
+                    return '', wait_until, retry_after, time.perf_counter() - started
+                return final_text, None, None, time.perf_counter() - started
         except asyncio.TimeoutError:
-            return 'Timeout su Bot A.', None
+            return 'Timeout su Bot A.', None, None, time.perf_counter() - started
         except (UserIsBlockedError, ChatWriteForbiddenError):
-            return 'Bot A bloccato o non scrivibile.', None
+            return 'Bot A bloccato o non scrivibile.', None, None, time.perf_counter() - started
         except FloodWaitError as exc:
-            return f'Flood wait Bot A: {exc.seconds}s.', None
+            return f'Flood wait Bot A: {exc.seconds}s.', None, None, time.perf_counter() - started
         except Exception as exc:  # noqa: BLE001
-            return f'Errore Bot A: {exc}', None
+            return f'Errore Bot A: {exc}', None, None, time.perf_counter() - started
 
     @staticmethod
     def _extract_wait_time(text: str) -> Optional[str]:
         match = WAIT_UNTIL_RE.search(text or '')
-        if not match:
-            return None
-        return match.group(1)
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _extract_countdown(text: str) -> Optional[str]:
+        match = COUNTDOWN_RE.search(text or '')
+        return match.group(1) if match else None
 
     async def _click_telegram_button(self, message: Message) -> None:
         if not message.buttons:
@@ -87,7 +107,8 @@ class ResolverClient:
                     await message.click(text=button.text)
                     return
 
-    async def _query_wow(self, target: str) -> str:
+    async def _query_wow(self, target: str) -> Tuple[str, float]:
+        started = time.perf_counter()
         loop = asyncio.get_running_loop()
         done_future: asyncio.Future[str] = loop.create_future()
 
@@ -105,17 +126,18 @@ class ResolverClient:
                 self.client.add_event_handler(on_edited, event_filter)
                 try:
                     await conv.get_response()
-                    return await asyncio.wait_for(done_future, timeout=60)
+                    result = await asyncio.wait_for(done_future, timeout=60)
+                    return result, time.perf_counter() - started
                 finally:
                     self.client.remove_event_handler(on_edited, event_filter)
         except asyncio.TimeoutError:
-            return 'Timeout su Bot B.'
+            return 'Timeout su Bot B.', time.perf_counter() - started
         except (UserIsBlockedError, ChatWriteForbiddenError):
-            return 'Bot B bloccato o non scrivibile.'
+            return 'Bot B bloccato o non scrivibile.', time.perf_counter() - started
         except FloodWaitError as exc:
-            return f'Flood wait Bot B: {exc.seconds}s.'
+            return f'Flood wait Bot B: {exc.seconds}s.', time.perf_counter() - started
         except Exception as exc:  # noqa: BLE001
-            return f'Errore Bot B: {exc}'
+            return f'Errore Bot B: {exc}', time.perf_counter() - started
 
     @staticmethod
     def _is_final_wow_text(text: str) -> bool:

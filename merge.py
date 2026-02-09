@@ -1,5 +1,5 @@
 import re
-from typing import Dict, Iterable, List
+from typing import Iterable, List
 
 from models import RawBotResponses, SearchResult
 
@@ -30,7 +30,7 @@ def _translate_status(line: str) -> str:
 
 
 def _normalize_registration(line: str) -> str:
-    match = re.search(r'registered\s*:\s*([A-Za-z]+)\s+(\d{4})', line, flags=re.IGNORECASE)
+    match = re.search(r'registered\s*[:\[]?\s*([A-Za-z]+)\s+(\d{4})\]?', line, flags=re.IGNORECASE)
     if not match:
         return line
     month = MONTH_MAP.get(match.group(1).lower())
@@ -43,6 +43,7 @@ def _sanitize(text: str) -> str:
     cleaned = text
     for pattern in SOURCE_PATTERNS:
         cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+    cleaned = CYRILLIC_RE.sub('', cleaned)
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
     return cleaned.strip()
 
@@ -52,7 +53,7 @@ def _dedupe(lines: Iterable[str]) -> List[str]:
     output: List[str] = []
     for raw in lines:
         line = _translate_status(_normalize_registration(raw.strip('•- \t')))
-        if not line or CYRILLIC_RE.search(line):
+        if not line:
             continue
         key = re.sub(r'\s+', ' ', line).lower().strip()
         if key in seen:
@@ -70,6 +71,14 @@ def _pick(lines: List[str], *keys: str) -> str:
     return 'N/D'
 
 
+def _status(raw: RawBotResponses, lines: List[str]) -> str:
+    if raw.bot_a_retry_after or raw.bot_a_wait_until:
+        return '!'
+    if not lines:
+        return '-'
+    return '+'
+
+
 def build_report(raw: RawBotResponses, elapsed_ms: int, target: str) -> SearchResult:
     merged = _sanitize('\n'.join(raw.as_dict().values()))
     lines = _dedupe(merged.splitlines())
@@ -77,18 +86,27 @@ def build_report(raw: RawBotResponses, elapsed_ms: int, target: str) -> SearchRe
     summary = [
         '✅ Tipo risultato: Aggregato Test1',
         f'👤 Identificatore: {target}',
-        f'🆔 ID: {_pick(lines, " id", "id:")}',
+        f'🆔 ID: {_pick(lines, " id", "id:", "telegram id")}',
         f'🗓️ Registrazione: {_pick(lines, "registr")}',
         f'👱 Nome: {_pick(lines, "nome", "name")}',
         f'📞 Telefono: {_pick(lines, "phone", "telefono")}',
         f'📊 Dati: {_pick(lines, "call", "ticket", "payment", "pagament")}',
     ]
 
-    if raw.bot_a_wait_until:
+    if raw.bot_a_retry_after:
+        summary.append(f'⏳ Bot A temporaneamente occupato. Riprova tra {raw.bot_a_retry_after}')
+    elif raw.bot_a_wait_until:
         summary.append(f'⚠️ Bot A non disponibile fino alle {raw.bot_a_wait_until}')
 
     summary.append('🕒 Storico:')
     history = [f'• {line}' for line in lines[:12]] or ['• Nessun dato disponibile']
 
     report_lines = summary + history + [f'\n⏱️ Tempo elaborazione: {elapsed_ms} ms']
-    return SearchResult(target=target, lines=report_lines, elapsed_ms=elapsed_ms)
+    return SearchResult(
+        target=target,
+        lines=report_lines,
+        elapsed_ms=elapsed_ms,
+        status=_status(raw, lines),
+        bot_a_seconds=raw.bot_a_seconds,
+        bot_b_seconds=raw.bot_b_seconds,
+    )
