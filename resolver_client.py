@@ -12,7 +12,7 @@ from models import RawBotResponses
 
 BOT_A = '@Botfindinformation_bot'
 BOT_B = '@WOW_MYAI_BOT'
-MAX_BOT_WAIT_S = 120
+MAX_BOT_WAIT_S = 180
 WAIT_UNTIL_RE = re.compile(r'new\s+requests\s+will\s+be\s+granted\s+at\s*(\d{1,2}:\d{2})', re.IGNORECASE)
 COUNTDOWN_RE = re.compile(r'\b(\d{2}:\d{2})\b')
 
@@ -46,10 +46,34 @@ class ResolverClient:
             text_b, sec_b = await self._query_wow(target)
             return RawBotResponses(wow_myai=text_b, bot_b_seconds=sec_b)
 
-        (text_a, wait_a, retry_after, sec_a), (text_b, sec_b) = await asyncio.gather(
-            self._query_botfind(target),
-            self._query_wow(target),
-        )
+        try:
+            results = await asyncio.gather(
+                self._query_botfind(target),
+                self._query_wow(target),
+                return_exceptions=True,
+            )
+        except asyncio.TimeoutError:
+            return RawBotResponses(
+                botfindinformation='Timeout su Bot A.',
+                wow_myai='Timeout su Bot B.',
+            )
+
+        bot_a_result = results[0]
+        bot_b_result = results[1]
+
+        text_a, wait_a, retry_after, sec_a = ('Timeout su Bot A.', None, None, None)
+        text_b, sec_b = ('Timeout su Bot B.', None)
+
+        if isinstance(bot_a_result, Exception):
+            text_a = f'Errore Bot A: {bot_a_result}'
+        else:
+            text_a, wait_a, retry_after, sec_a = bot_a_result
+
+        if isinstance(bot_b_result, Exception):
+            text_b = f'Errore Bot B: {bot_b_result}'
+        else:
+            text_b, sec_b = bot_b_result
+
         return RawBotResponses(
             botfindinformation=text_a,
             wow_myai=text_b,
