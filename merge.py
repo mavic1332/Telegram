@@ -55,10 +55,14 @@ def _extract_bot_b_id(text: str) -> Optional[str]:
 
 
 def _extract_bot_b_registered(text: str) -> Optional[str]:
-    match = re.search(r'(?is)Registered\s*\n\s*([^\n\r]+)', text)
+    match = re.search(r'(?is)Registered\s*\n\s*(.*?)(?:\n\s*🤖\s*Bots\b|$)', text)
     if not match:
         return None
-    return _to_it_month(match.group(1).strip())
+    block = match.group(1)
+    lines = [ln.strip() for ln in re.split(r'\r?\n', block) if ln.strip()]
+    if not lines:
+        return None
+    return _to_it_month(', '.join(lines))
 
 
 def _extract_bot_a_phone(text: str) -> Optional[str]:

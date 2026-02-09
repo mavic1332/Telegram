@@ -50,22 +50,26 @@ async def _run_with_progress(
     mode: str,
     db: SilentDatabase,
 ) -> None:
-    progress = await message.answer('Elaborazione in corso... 0%')
+    progress = await message.answer('Elaborazione... 0%')
 
     last_percent = 0
 
     async def progress_cb(stage: str) -> None:
         nonlocal last_percent
         stage_map = {
-            'bot_a': 50,
-            'bot_b': 90,
-            'parsed': 100,
+            'bot_a_clicked': (20, 'Interazione Bot A... 20%'),
+            'bot_a': (50, 'Dati Bot A ricevuti... 50%'),
+            'bot_b': (90, 'Dati Bot B ricevuti... 90%'),
+            'parsed': (100, 'Completato 100%'),
         }
-        pct = stage_map.get(stage)
-        if pct is None or pct <= last_percent:
+        data = stage_map.get(stage)
+        if not data:
+            return
+        pct, msg = data
+        if pct <= last_percent:
             return
         last_percent = pct
-        await progress.edit_text(f'Elaborazione in corso... {pct}%')
+        await progress.edit_text(msg)
 
     started = asyncio.get_running_loop().time()
     result = await pipeline.run(target, mode=mode, progress_cb=progress_cb)
