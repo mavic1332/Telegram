@@ -14,10 +14,14 @@ from models import RawBotResponses, UserProfile
 BOT_A = '@Botfindinformation_bot'
 BOT_B = '@WOW_MYAI_BOT'
 MAX_BOT_WAIT_S = 30
+PRIORITY_DELIVERY_S = 15
 WAIT_UNTIL_RE = re.compile(r'new\s+requests\s+will\s+be\s+granted\s+at\s*(\d{1,2}:\d{2})', re.IGNORECASE)
 COUNTDOWN_RE = re.compile(r'\b(\d{2}:\d{2})\b')
 ProgressCb = Optional[Callable[[str], Awaitable[None]]]
-LIMIT_RE = re.compile(r'(?:daily\s+limit\s+reached|limit\s+reached|лимит|rate\s*limit|wait\s*\d+\s*[hm]|attendi\s*\d+\s*[hm])', re.IGNORECASE)
+LIMIT_RE = re.compile(
+    r'(?:daily\s+limit\s+reached|limit\s+reached|лимит|rate\s*limit|wait\s*\d+\s*[hm]|attendi\s*\d+\s*[hm])',
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -40,9 +44,11 @@ class ResolverClient:
     async def fetch_info(self, target: str, mode: str = 'all', progress_cb: ProgressCb = None) -> RawBotResponses:
         profile = UserProfile(phone=self._phone_cache.get(target))
 
+        def update_profile(bot_name: str, payload: str) -> None:
+            self._merge_profile(profile, bot_name, payload)
+
         if mode == 'bot_a':
-            text_a, wait_a, retry_after, sec_a = await self._query_botfind(target, progress_cb=progress_cb)
-            self._merge_profile(profile, 'bot_a', text_a)
+            text_a, wait_a, retry_after, sec_a = await self._query_botfind(target, progress_cb=progress_cb, profile_updater=update_profile)
             return RawBotResponses(
                 botfindinformation=text_a,
                 bot_a_wait_until=wait_a,
@@ -53,55 +59,49 @@ class ResolverClient:
             )
 
         if mode == 'bot_b':
-            text_b, sec_b = await self._query_wow(target, progress_cb=progress_cb)
-            self._merge_profile(profile, 'bot_b', text_b)
+            text_b, sec_b = await self._query_wow(target, progress_cb=progress_cb, profile_updater=update_profile)
             return RawBotResponses(wow_myai=text_b, bot_b_seconds=sec_b, bot_a_phone=profile.phone, profile=profile)
 
         started = time.perf_counter()
-        task_a = asyncio.create_task(self._query_botfind(target, progress_cb=progress_cb))
-        task_b = asyncio.create_task(self._query_wow(target, progress_cb=progress_cb))
+        task_a = asyncio.create_task(self._query_botfind(target, progress_cb=progress_cb, profile_updater=update_profile))
+        task_b = asyncio.create_task(self._query_wow(target, progress_cb=progress_cb, profile_updater=update_profile))
 
         text_a, wait_a, retry_after, sec_a = ('Timeout su Bot A.', None, None, None)
         text_b, sec_b = ('Timeout su Bot B.', None)
+        bot_b_terminal = False
 
         while True:
             elapsed = time.perf_counter() - started
             pending_names = []
             if not task_a.done():
                 pending_names.append('Bot A')
-            if not task_b.done():
+            if not task_b.done() and not bot_b_terminal:
                 pending_names.append('Bot B')
-
             if pending_names:
                 logging.info('[WAITING] for %s... (%.1fs elapsed)', ' and '.join(pending_names), elapsed)
 
-            if task_a.done() and text_a == 'Timeout su Bot A.':
-                try:
-                    result_a = task_a.result()
-                except Exception:
-                    result_a = ('Timeout su Bot A.', None, None, elapsed)
-                text_a, wait_a, retry_after, sec_a = result_a
-                self._merge_profile(profile, 'bot_a', text_a)
+            done, _ = await asyncio.wait({task_a, task_b}, timeout=1, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                if task is task_a and text_a == 'Timeout su Bot A.':
+                    try:
+                        text_a, wait_a, retry_after, sec_a = task.result()
+                    except Exception:
+                        text_a, wait_a, retry_after, sec_a = ('Timeout su Bot A.', None, None, max(0.01, elapsed))
+                elif task is task_b and text_b == 'Timeout su Bot B.':
+                    try:
+                        text_b, sec_b = task.result()
+                    except Exception:
+                        text_b, sec_b = ('Timeout su Bot B.', max(0.01, elapsed))
+                    if self._is_bot_b_error(text_b):
+                        bot_b_terminal = True
 
-            if task_b.done() and text_b == 'Timeout su Bot B.':
-                try:
-                    result_b = task_b.result()
-                except Exception:
-                    result_b = ('Timeout su Bot B.', elapsed)
-                text_b, sec_b = result_b
-                self._merge_profile(profile, 'bot_b', text_b)
-
-            bot_b_failed_fast = self._is_bot_b_error(text_b)
-            if task_b.done() and bot_b_failed_fast:
-                break
-
-            if self._has_core_profile(profile) and not task_b.done() and elapsed >= 15:
+            if self._has_core_profile(profile) and not task_b.done() and not bot_b_terminal and elapsed >= PRIORITY_DELIVERY_S:
                 text_b = 'Timeout/limite Bot B: consegna prioritaria con dati Bot A.'
                 sec_b = max(0.01, elapsed)
+                bot_b_terminal = True
                 task_b.cancel()
-                break
 
-            if task_a.done() and task_b.done():
+            if task_a.done() and (task_b.done() or bot_b_terminal):
                 break
 
             if elapsed >= MAX_BOT_WAIT_S:
@@ -113,7 +113,10 @@ class ResolverClient:
                     sec_b = max(0.01, elapsed)
                 break
 
-            await asyncio.sleep(1)
+        if sec_a is None:
+            sec_a = max(0.01, time.perf_counter() - started)
+        if sec_b is None:
+            sec_b = max(0.01, time.perf_counter() - started)
 
         if profile.phone:
             self._phone_cache[target] = profile.phone
@@ -158,7 +161,12 @@ class ResolverClient:
         finally:
             self.client.remove_event_handler(on_new_message, event_filter)
 
-    async def _query_botfind(self, target: str, progress_cb: ProgressCb = None) -> Tuple[str, Optional[str], Optional[str], float]:
+    async def _query_botfind(
+        self,
+        target: str,
+        progress_cb: ProgressCb = None,
+        profile_updater: Optional[Callable[[str, str], None]] = None,
+    ) -> Tuple[str, Optional[str], Optional[str], float]:
         started = time.perf_counter()
         try:
             async with self.client.conversation(BOT_A, timeout=MAX_BOT_WAIT_S) as conv:
@@ -193,6 +201,9 @@ class ResolverClient:
                 retry_after = self._extract_countdown(result_text)
                 parsed = self._apply_regex_enrichment('a', result_text)
 
+                if profile_updater:
+                    profile_updater('bot_a', parsed)
+
                 phone = self._extract_phone(parsed)
                 if phone:
                     self._phone_cache[target] = phone
@@ -212,13 +223,20 @@ class ResolverClient:
         except Exception as exc:  # noqa: BLE001
             return f'Errore Bot A: {exc}', None, None, max(0.01, time.perf_counter() - started)
 
-    async def _query_wow(self, target: str, progress_cb: ProgressCb = None) -> Tuple[str, float]:
+    async def _query_wow(
+        self,
+        target: str,
+        progress_cb: ProgressCb = None,
+        profile_updater: Optional[Callable[[str, str], None]] = None,
+    ) -> Tuple[str, float]:
         started = time.perf_counter()
         try:
             entity = await self.client.get_entity(BOT_B)
             await self.client.send_message(entity, target)
             text, sec_b = await self._listen_first_text(entity.id, MAX_BOT_WAIT_S, predicate=self._is_terminal_bot_b_message)
             parsed = self._apply_regex_enrichment('b', text)
+            if profile_updater:
+                profile_updater('bot_b', parsed)
             if progress_cb:
                 await progress_cb('bot_b')
             return parsed, sec_b
@@ -301,7 +319,10 @@ class ResolverClient:
         reg_match = re.search(r'(?is)\bRegistered\b\s*:?\s*(.*?)(?:\n\s*🤖\s*Bots\b|$)', payload)
         if reg_match and not profile.registration:
             lines = [ln.strip() for ln in re.split(r'\r?\n', reg_match.group(1)) if ln.strip()]
-            clean_dates = [ln for ln in lines if 'search by telegram id' not in ln.lower() and not re.fullmatch(r'\d{7,10}', re.sub(r'\D', '', ln))]
+            clean_dates = [
+                ln for ln in lines
+                if 'search by telegram id' not in ln.lower() and not re.fullmatch(r'\d{7,10}', re.sub(r'\D', '', ln))
+            ]
             if clean_dates:
                 profile.registration = ', '.join(clean_dates)
 
