@@ -1,14 +1,30 @@
-# test1 Telegram Bot
+# test1 Telegram Bot + Local Gateway
 
-Bot Telegram async (Python 3.11+) con pipeline in 2 fasi:
-1. **Resolver primario**: da telefono/@username produce `canonical_id` + metadati minimi.
-2. **Arricchimento + merge**: interroga due servizi interni in parallelo e restituisce una scheda unificata.
+Progetto completo con:
+- **bot Telegram async** (Python 3.11+) chiamato `test1`
+- **gateway locale FastAPI** (`gateway/`) con endpoint:
+  - `POST /telegram/resolve`
+  - `POST /telegram/enrich`
 
-> L'output utente non espone mai nomi di servizi/fonti/endpoint.
+Il bot mantiene output utente neutrale (nessun nome di fonti/servizi).
 
-## Requisiti
-- Python 3.11+
-- Dipendenze in `requirements.txt`
+## Architettura
+1. Utente invia telefono o `@username` al bot.
+2. Bot chiama gateway `/telegram/resolve` per ottenere `canonical_id`.
+3. Bot chiama gateway `/telegram/enrich` e applica merge finale locale.
+4. Bot mostra una sola scheda unificata.
+
+## Modalità gateway
+### 1) MOCK (default)
+Se `GATEWAY_DB_PATH` è vuoto, il gateway restituisce dati finti realistici e **deterministici** in base alla query.
+
+### 2) DB MODE
+Se `GATEWAY_DB_PATH` è impostato, il gateway legge SQLite:
+- tabella `contacts`
+- tabella `history`
+
+## Sicurezza gateway
+Header `X-API-KEY` obbligatorio su tutti gli endpoint.
 
 ## Setup
 ```bash
@@ -18,57 +34,49 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Compila `.env`:
+Configura `.env` con almeno:
 ```env
-TELEGRAM_BOT_TOKEN=
-RESOLVER_BASE_URL=mock
-RESOLVER_API_KEY=
-SERVICE_A_BASE_URL=mock
-SERVICE_A_API_KEY=
-SERVICE_B_BASE_URL=mock
-SERVICE_B_API_KEY=
-VOIP_TIMEOUT_SECONDS=10
-ALLOWED_CHAT_IDS=123,456
-AUDIT_DB_PATH=./audit.db
-LOG_LEVEL=INFO
-MASK_OUTPUT=false
+TELEGRAM_BOT_TOKEN=<token_bot>
+VOIP_BASE_URL=http://127.0.0.1:8000
+VOIP_API_KEY=change-me
+GATEWAY_API_KEY=change-me
+GATEWAY_DB_PATH=
 ```
 
-## Avvio
+## Avvio gateway
+```bash
+python -m gateway.main
+```
+
+## Avvio bot
 ```bash
 python -m app.main
 ```
 
-## Flow conversazionale
-- `/start` mostra prompt iniziale.
-- Input utente:
-  - `@username` valido: `^@[A-Za-z0-9_]{5,32}$`
-  - altrimenti telefono (normalizzato)
-- Mostra keyboard con tipo ricerca (`Telegram`, `Instagram`, `Tiktok`).
-- Callback:
-  - messaggio iniziale `⏳ Sto cercando, attendi…`
-  - progress update: `Search… 25%`, `Search… 75%`
-  - fase 1 resolver (timeout+retry)
-  - fase 2 enrichment in parallelo (timeout+retry, degradazione elegante)
-  - output unico finale
+## Esempi curl gateway
+### Resolve
+```bash
+curl -X POST 'http://127.0.0.1:8000/telegram/resolve' \
+  -H 'Content-Type: application/json' \
+  -H 'X-API-KEY: change-me' \
+  -d '{"identifier":"@ciao1234","search_type":"Telegram"}'
+```
 
-## Sicurezza
-- **Allowlist chat_id** con `ALLOWED_CHAT_IDS`.
-- **Rate-limit**: 1 richiesta / 3 secondi per chat.
-- **Logging con masking**: identifier mai in chiaro nei log error.
-- **Audit SQLite**: salva solo timestamp/chat_id/search_type/esito/durata.
+### Enrich
+```bash
+curl -X POST 'http://127.0.0.1:8000/telegram/enrich' \
+  -H 'Content-Type: application/json' \
+  -H 'X-API-KEY: change-me' \
+  -d '{"canonical_id":"CID-ABC123","normalized_identifier":"@ciao1234","search_type":"Telegram"}'
+```
 
-## Mock mode
-Se `RESOLVER_BASE_URL`, `SERVICE_A_BASE_URL`, `SERVICE_B_BASE_URL` sono `mock`, il bot restituisce dati realistici fittizi utili per sviluppo locale.
-
-## Test
+## Avvio test
 ```bash
 pytest -q
 ```
 
-Copertura minima inclusa:
-- validazione input
-- merge
-- pipeline mock
-- masking
-- rate limit
+## Note sicurezza/operatività bot
+- allowlist chat con `ALLOWED_CHAT_IDS`
+- rate limit per chat (1 richiesta ogni 3 secondi)
+- masking nei log
+- audit SQLite minimale (senza identificatori in chiaro)

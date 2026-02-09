@@ -5,11 +5,10 @@ import logging
 import time
 from typing import Awaitable, Callable
 
+from app.gateway_client import GatewayClient
 from app.merge import merge_results
 from app.models import UnifiedResult
 from app.resolver_client import ResolverClient
-from app.services.service_a import ServiceAClient
-from app.services.service_b import ServiceBClient
 
 logger = logging.getLogger(__name__)
 
@@ -17,8 +16,7 @@ logger = logging.getLogger(__name__)
 class Pipeline:
     def __init__(self) -> None:
         self.resolver = ResolverClient()
-        self.service_a = ServiceAClient()
-        self.service_b = ServiceBClient()
+        self.gateway = GatewayClient()
 
     async def run(
         self,
@@ -33,16 +31,15 @@ class Pipeline:
         await progress_cb("Search… 75%")
         resolver_result = await resolver_task
 
-        results = await asyncio.gather(
-            self.service_a.lookup(resolver_result.canonical_id, normalized_identifier, search_type),
-            self.service_b.lookup(resolver_result.canonical_id, normalized_identifier, search_type),
-            return_exceptions=True,
-        )
-
-        a_result = None if isinstance(results[0], Exception) else results[0]
-        b_result = None if isinstance(results[1], Exception) else results[1]
-
-        if not a_result and not b_result:
+        a_result = None
+        b_result = None
+        try:
+            a_result, b_result = await self.gateway.enrich(
+                resolver_result.canonical_id,
+                normalized_identifier,
+                search_type,
+            )
+        except Exception:  # noqa: BLE001
             logger.warning("Enrichment unavailable for canonical_id=%s", resolver_result.canonical_id)
 
         unified = merge_results(search_type, resolver_result, a_result, b_result)

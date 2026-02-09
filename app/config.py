@@ -7,16 +7,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    telegram_bot_token: str = Field(alias="TELEGRAM_BOT_TOKEN")
+    telegram_bot_token: str = Field(default="dev-token", alias="TELEGRAM_BOT_TOKEN")
 
-    resolver_base_url: str = Field(default="mock", alias="RESOLVER_BASE_URL")
-    resolver_api_key: str = Field(default="", alias="RESOLVER_API_KEY")
-
-    service_a_base_url: str = Field(default="mock", alias="SERVICE_A_BASE_URL")
-    service_a_api_key: str = Field(default="", alias="SERVICE_A_API_KEY")
-
-    service_b_base_url: str = Field(default="mock", alias="SERVICE_B_BASE_URL")
-    service_b_api_key: str = Field(default="", alias="SERVICE_B_API_KEY")
+    voip_base_url: str = Field(default="mock", alias="VOIP_BASE_URL")
+    voip_api_key: str = Field(default="change-me", alias="VOIP_API_KEY")
 
     voip_timeout_seconds: int = Field(default=10, alias="VOIP_TIMEOUT_SECONDS")
     allowed_chat_ids: str = Field(default="", alias="ALLOWED_CHAT_IDS")
