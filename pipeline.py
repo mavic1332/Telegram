@@ -6,7 +6,7 @@ from models import RawBotResponses, SearchResult
 from resolver_client import ResolverClient
 from utils import now_ms
 
-PIPELINE_BOT_TIMEOUT_S = 60
+PIPELINE_BOT_TIMEOUT_S = 30
 ProgressCb = Optional[Callable[[str], Awaitable[None]]]
 
 

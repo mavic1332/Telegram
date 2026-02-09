@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -12,11 +13,11 @@ from models import RawBotResponses, UserProfile
 
 BOT_A = '@Botfindinformation_bot'
 BOT_B = '@WOW_MYAI_BOT'
-MAX_BOT_WAIT_S = 60
+MAX_BOT_WAIT_S = 30
 WAIT_UNTIL_RE = re.compile(r'new\s+requests\s+will\s+be\s+granted\s+at\s*(\d{1,2}:\d{2})', re.IGNORECASE)
 COUNTDOWN_RE = re.compile(r'\b(\d{2}:\d{2})\b')
 ProgressCb = Optional[Callable[[str], Awaitable[None]]]
-LIMIT_RE = re.compile(r'(?:daily\s+limit\s+reached|limit\s+reached|лимит|rate\s*limit)', re.IGNORECASE)
+LIMIT_RE = re.compile(r'(?:daily\s+limit\s+reached|limit\s+reached|лимит|rate\s*limit|wait\s*\d+\s*[hm]|attendi\s*\d+\s*[hm])', re.IGNORECASE)
 
 
 @dataclass
@@ -56,34 +57,63 @@ class ResolverClient:
             self._merge_profile(profile, 'bot_b', text_b)
             return RawBotResponses(wow_myai=text_b, bot_b_seconds=sec_b, bot_a_phone=profile.phone, profile=profile)
 
-        bot_jobs = {
-            'bot_a': asyncio.create_task(self._query_botfind(target, progress_cb=progress_cb)),
-            'bot_b': asyncio.create_task(self._query_wow(target, progress_cb=progress_cb)),
-        }
+        started = time.perf_counter()
+        task_a = asyncio.create_task(self._query_botfind(target, progress_cb=progress_cb))
+        task_b = asyncio.create_task(self._query_wow(target, progress_cb=progress_cb))
 
         text_a, wait_a, retry_after, sec_a = ('Timeout su Bot A.', None, None, None)
         text_b, sec_b = ('Timeout su Bot B.', None)
 
-        done, pending = await asyncio.wait(set(bot_jobs.values()), timeout=MAX_BOT_WAIT_S)
-        for task in done:
-            bot_name = 'bot_a' if task is bot_jobs['bot_a'] else 'bot_b'
-            try:
-                result = task.result()
-            except Exception:
-                if bot_name == 'bot_a':
-                    result = ('Timeout su Bot A.', None, None, MAX_BOT_WAIT_S)
-                else:
-                    result = ('Timeout su Bot B.', MAX_BOT_WAIT_S)
+        while True:
+            elapsed = time.perf_counter() - started
+            pending_names = []
+            if not task_a.done():
+                pending_names.append('Bot A')
+            if not task_b.done():
+                pending_names.append('Bot B')
 
-            if bot_name == 'bot_a':
-                text_a, wait_a, retry_after, sec_a = result
-                self._merge_profile(profile, bot_name, text_a)
-            else:
-                text_b, sec_b = result
-                self._merge_profile(profile, bot_name, text_b)
+            if pending_names:
+                logging.info('[WAITING] for %s... (%.1fs elapsed)', ' and '.join(pending_names), elapsed)
 
-        for task in pending:
-            task.cancel()
+            if task_a.done() and text_a == 'Timeout su Bot A.':
+                try:
+                    result_a = task_a.result()
+                except Exception:
+                    result_a = ('Timeout su Bot A.', None, None, elapsed)
+                text_a, wait_a, retry_after, sec_a = result_a
+                self._merge_profile(profile, 'bot_a', text_a)
+
+            if task_b.done() and text_b == 'Timeout su Bot B.':
+                try:
+                    result_b = task_b.result()
+                except Exception:
+                    result_b = ('Timeout su Bot B.', elapsed)
+                text_b, sec_b = result_b
+                self._merge_profile(profile, 'bot_b', text_b)
+
+            bot_b_failed_fast = self._is_bot_b_error(text_b)
+            if task_b.done() and bot_b_failed_fast:
+                break
+
+            if self._has_core_profile(profile) and not task_b.done() and elapsed >= 15:
+                text_b = 'Timeout/limite Bot B: consegna prioritaria con dati Bot A.'
+                sec_b = max(0.01, elapsed)
+                task_b.cancel()
+                break
+
+            if task_a.done() and task_b.done():
+                break
+
+            if elapsed >= MAX_BOT_WAIT_S:
+                if not task_a.done():
+                    task_a.cancel()
+                    sec_a = max(0.01, elapsed)
+                if not task_b.done():
+                    task_b.cancel()
+                    sec_b = max(0.01, elapsed)
+                break
+
+            await asyncio.sleep(1)
 
         if profile.phone:
             self._phone_cache[target] = profile.phone
@@ -99,6 +129,15 @@ class ResolverClient:
             profile=profile,
         )
 
+    @staticmethod
+    def _has_core_profile(profile: UserProfile) -> bool:
+        return bool(profile.identifier and profile.phone)
+
+    @staticmethod
+    def _is_bot_b_error(text: str) -> bool:
+        lowered = (text or '').lower()
+        return bool(LIMIT_RE.search(lowered) or 'timeout su bot b' in lowered or 'errore bot b' in lowered)
+
     async def _listen_first_text(self, chat_id: int, timeout: int, predicate: Optional[Callable[[str], bool]] = None) -> Tuple[str, float]:
         loop = asyncio.get_running_loop()
         start = time.perf_counter()
@@ -110,7 +149,7 @@ class ResolverClient:
                 return
             if predicate and not predicate(text):
                 return
-            done_future.set_result((text, max(0.001, time.perf_counter() - start)))
+            done_future.set_result((text, max(0.01, time.perf_counter() - start)))
 
         event_filter = events.NewMessage(chats=[chat_id])
         self.client.add_event_handler(on_new_message, event_filter)
@@ -149,7 +188,7 @@ class ResolverClient:
                 else:
                     result_text = menu_msg.raw_text or ''
 
-                sec_a = max(0.001, time.perf_counter() - started)
+                sec_a = max(0.01, time.perf_counter() - started)
                 wait_until = self._extract_wait_time(result_text)
                 retry_after = self._extract_countdown(result_text)
                 parsed = self._apply_regex_enrichment('a', result_text)
@@ -165,13 +204,13 @@ class ResolverClient:
                     return '', wait_until, retry_after, sec_a
                 return parsed, None, None, sec_a
         except asyncio.TimeoutError:
-            return 'Timeout su Bot A.', None, None, max(0.001, time.perf_counter() - started)
+            return 'Timeout su Bot A.', None, None, max(0.01, time.perf_counter() - started)
         except (UserIsBlockedError, ChatWriteForbiddenError):
-            return 'Bot A bloccato o non scrivibile.', None, None, max(0.001, time.perf_counter() - started)
+            return 'Bot A bloccato o non scrivibile.', None, None, max(0.01, time.perf_counter() - started)
         except FloodWaitError as exc:
-            return f'Flood wait Bot A: {exc.seconds}s.', None, None, max(0.001, time.perf_counter() - started)
+            return f'Flood wait Bot A: {exc.seconds}s.', None, None, max(0.01, time.perf_counter() - started)
         except Exception as exc:  # noqa: BLE001
-            return f'Errore Bot A: {exc}', None, None, max(0.001, time.perf_counter() - started)
+            return f'Errore Bot A: {exc}', None, None, max(0.01, time.perf_counter() - started)
 
     async def _query_wow(self, target: str, progress_cb: ProgressCb = None) -> Tuple[str, float]:
         started = time.perf_counter()
@@ -184,13 +223,13 @@ class ResolverClient:
                 await progress_cb('bot_b')
             return parsed, sec_b
         except asyncio.TimeoutError:
-            return 'Timeout su Bot B.', max(0.001, time.perf_counter() - started)
+            return 'Timeout su Bot B.', max(0.01, time.perf_counter() - started)
         except (UserIsBlockedError, ChatWriteForbiddenError):
-            return 'Bot B bloccato o non scrivibile.', max(0.001, time.perf_counter() - started)
+            return 'Bot B bloccato o non scrivibile.', max(0.01, time.perf_counter() - started)
         except FloodWaitError as exc:
-            return f'Flood wait Bot B: {exc.seconds}s.', max(0.001, time.perf_counter() - started)
+            return f'Flood wait Bot B: {exc.seconds}s.', max(0.01, time.perf_counter() - started)
         except Exception as exc:  # noqa: BLE001
-            return f'Errore Bot B: {exc}', max(0.001, time.perf_counter() - started)
+            return f'Errore Bot B: {exc}', max(0.01, time.perf_counter() - started)
 
     @staticmethod
     def _is_terminal_bot_b_message(text: str) -> bool:
