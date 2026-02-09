@@ -1,67 +1,63 @@
 import re
-from typing import Dict, List
+from typing import Dict, Iterable, List
 
-BOT_TAGS = (r'@Botfindinformation_bot', r'@WOW_MYAI_BOT')
+from models import SearchResult
+
+SOURCE_PATTERNS = [
+    r'@Botfindinformation_bot',
+    r'@WOW_MYAI_BOT',
+    r'(?im)^.*powered\s+by.*$',
+    r'(?im)^.*join\s+channel.*$',
+    r'https?://t\.me/\S+',
+]
 
 
-def _clean_text(text: str) -> str:
+def _sanitize(text: str) -> str:
     cleaned = text
-    for bot_tag in BOT_TAGS:
-        cleaned = re.sub(bot_tag, '', cleaned, flags=re.IGNORECASE)
-
-    cleaned = re.sub(r'(?im)^.*powered by.*$', '', cleaned)
-    cleaned = re.sub(r'(?im)^.*join\s+channel.*$', '', cleaned)
-    cleaned = re.sub(r'https?://t\.me/\S+', '', cleaned)
+    for pattern in SOURCE_PATTERNS:
+        cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
     return cleaned.strip()
 
 
-def _dedupe_lines(text: str) -> List[str]:
+def _dedupe(lines: Iterable[str]) -> List[str]:
     seen = set()
-    lines: List[str] = []
-
-    for raw in text.splitlines():
+    output: List[str] = []
+    for raw in lines:
         line = raw.strip('•- \t')
         if not line:
             continue
-
-        key = re.sub(r'\s+', ' ', line).strip().lower()
+        key = re.sub(r'\s+', ' ', line).lower().strip()
         if key in seen:
             continue
-
         seen.add(key)
-        lines.append(line)
-
-    return lines
-
-
-def _emoji(line: str) -> str:
-    lower = line.lower()
-    if 'name' in lower or 'username' in lower:
-        return '👤'
-    if 'phone' in lower or re.search(r'\+?\d{7,}', line):
-        return '📞'
-    if 'id' in lower:
-        return '🆔'
-    if 'email' in lower:
-        return '📧'
-    if 'location' in lower or 'address' in lower:
-        return '📍'
-    return '📌'
+        output.append(line)
+    return output
 
 
-def build_test1_output(raw_responses: Dict[str, str]) -> str:
-    merged_raw = '\n'.join(raw_responses.values())
-    cleaned = _clean_text(merged_raw)
-    unique_lines = _dedupe_lines(cleaned)
+def _pick(lines: List[str], *keys: str) -> str:
+    for line in lines:
+        lower = line.lower()
+        if any(k in lower for k in keys):
+            return line
+    return 'N/D'
 
-    if not unique_lines:
-        return '🧪 *Test1*\n\n⚠️ Nessun dato utile trovato.'
 
-    body = '\n'.join(f'{_emoji(line)} {line}' for line in unique_lines)
-    return (
-        '🧪 *Test1*\n'
-        '━━━━━━━━━━━━━━\n'
-        '📋 *Risultati Ricerca*\n\n'
-        f'{body}'
-    )
+def build_report(raw: Dict[str, str], elapsed_ms: int, target: str) -> SearchResult:
+    merged = _sanitize('\n'.join(raw.values()))
+    lines = _dedupe(merged.splitlines())
+
+    summary = [
+        '✅ Tipo risultato: Aggregato Test1',
+        f'👤 Identificatore: {target}',
+        f'🆔 ID: {_pick(lines, " id", "id:")}',
+        f'🗓️ Registrazione: {_pick(lines, "registr", "created")}',
+        f'👱 Nome: {_pick(lines, "nome", "name")}',
+        f'📞 Telefono: {_pick(lines, "phone", "telefono")}',
+        f'📊 Dati: {_pick(lines, "call", "ticket", "payment", "pagament")}',
+        '🕒 Storico:',
+    ]
+    history = [f'• {line}' for line in lines[:12]] or ['• Nessun dato disponibile']
+
+    report_lines = summary + history + [f'\n⏱️ Tempo elaborazione: {elapsed_ms} ms']
+    return SearchResult(target=target, lines=report_lines, elapsed_ms=elapsed_ms)

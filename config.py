@@ -1,4 +1,3 @@
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict
@@ -10,10 +9,10 @@ ENV_PATH = Path('.env')
 
 @dataclass
 class Settings:
-    bot_token: str
     api_id: int
     api_hash: str
-    phone_number: str
+    bot_token: str
+    phone: str
 
 
 def _ensure_env_file() -> None:
@@ -21,21 +20,27 @@ def _ensure_env_file() -> None:
         return
 
     ENV_PATH.write_text(
-        'BOT_TOKEN=\n'
         'API_ID=\n'
         'API_HASH=\n'
-        'PHONE_NUMBER=\n',
+        'BOT_TOKEN=\n'
+        'PHONE=\n',
         encoding='utf-8',
     )
 
 
-def _prompt_missing(values: Dict[str, str], key: str, label: str) -> str:
-    if values.get(key):
-        return str(values[key]).strip()
+def _prompt_for_key(values: Dict[str, str], key: str, prompt: str) -> str:
+    current = (values.get(key) or '').strip()
+    if current:
+        return current
+
+    if key == 'PHONE' and values.get('PHONE_NUMBER'):
+        migrated = str(values['PHONE_NUMBER']).strip()
+        set_key(str(ENV_PATH), 'PHONE', migrated)
+        return migrated
 
     user_input = ''
     while not user_input:
-        user_input = input(f'Inserisci {label}: ').strip()
+        user_input = input(f'{prompt}: ').strip()
 
     set_key(str(ENV_PATH), key, user_input)
     return user_input
@@ -44,21 +49,11 @@ def _prompt_missing(values: Dict[str, str], key: str, label: str) -> str:
 def load_settings() -> Settings:
     _ensure_env_file()
     load_dotenv(ENV_PATH)
-    raw = dotenv_values(ENV_PATH)
+    values = dotenv_values(ENV_PATH)
 
-    bot_token = _prompt_missing(raw, 'BOT_TOKEN', 'BOT_TOKEN (BotFather)')
-    api_id = _prompt_missing(raw, 'API_ID', 'API_ID')
-    api_hash = _prompt_missing(raw, 'API_HASH', 'API_HASH')
-    phone_number = _prompt_missing(raw, 'PHONE_NUMBER', 'PHONE_NUMBER (+39...)')
+    api_id = _prompt_for_key(values, 'API_ID', 'Inserisci API_ID')
+    api_hash = _prompt_for_key(values, 'API_HASH', 'Inserisci API_HASH')
+    bot_token = _prompt_for_key(values, 'BOT_TOKEN', 'Inserisci BOT_TOKEN')
+    phone = _prompt_for_key(values, 'PHONE', 'Inserisci PHONE (+39...)')
 
-    os.environ['BOT_TOKEN'] = bot_token
-    os.environ['API_ID'] = api_id
-    os.environ['API_HASH'] = api_hash
-    os.environ['PHONE_NUMBER'] = phone_number
-
-    return Settings(
-        bot_token=bot_token,
-        api_id=int(api_id),
-        api_hash=api_hash,
-        phone_number=phone_number,
-    )
+    return Settings(api_id=int(api_id), api_hash=api_hash, bot_token=bot_token, phone=phone)

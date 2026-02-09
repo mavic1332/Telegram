@@ -1,28 +1,27 @@
 import asyncio
 
-from bot import run_bot
+from bot import run_frontend
 from config import load_settings
+from pipeline import SearchPipeline
 from resolver_client import ResolverClient
 
 
-async def runner() -> None:
+async def main() -> None:
     settings = load_settings()
     resolver = ResolverClient(
         api_id=settings.api_id,
         api_hash=settings.api_hash,
-        phone_number=settings.phone_number,
+        phone=settings.phone,
     )
 
     await resolver.start()
-    shutdown_waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    pipeline = SearchPipeline(resolver)
 
     try:
-        await run_bot(settings.bot_token, resolver, shutdown_waiter)
+        await run_frontend(settings.bot_token, pipeline)
     finally:
-        if not shutdown_waiter.done():
-            shutdown_waiter.set_result(None)
         await resolver.stop()
 
 
 if __name__ == '__main__':
-    asyncio.run(runner())
+    asyncio.run(main())
