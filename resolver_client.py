@@ -6,12 +6,12 @@ from typing import Awaitable, Callable, Optional, Tuple
 
 from telethon import TelegramClient, events
 from telethon.errors import ChatWriteForbiddenError, FloodWaitError, UserIsBlockedError
-from telethon.tl.custom.message import Message
 
 from models import RawBotResponses
 
 BOT_A = '@Botfindinformation_bot'
 BOT_B = '@WOW_MYAI_BOT'
+BOT_A_ID = 8585975791
 MAX_BOT_WAIT_S = 180
 WAIT_UNTIL_RE = re.compile(r'new\s+requests\s+will\s+be\s+granted\s+at\s*(\d{1,2}:\d{2})', re.IGNORECASE)
 COUNTDOWN_RE = re.compile(r'\b(\d{2}:\d{2})\b')
@@ -40,6 +40,7 @@ class ResolverClient:
             if progress_cb:
                 await progress_cb('bot_a')
             return RawBotResponses(botfindinformation=text_a, bot_a_wait_until=wait_a, bot_a_retry_after=retry_after, bot_a_seconds=sec_a)
+
         if mode == 'bot_b':
             text_b, sec_b = await self._query_wow(target)
             if progress_cb:
@@ -78,6 +79,7 @@ class ResolverClient:
         for task in (task_a, task_b):
             if not task.done():
                 task.cancel()
+
         return RawBotResponses(
             botfindinformation=text_a,
             wow_myai=text_b,
@@ -87,30 +89,36 @@ class ResolverClient:
             bot_b_seconds=sec_b,
         )
 
+    async def _listen_first_text(self, chat_id: int, timeout: int) -> Tuple[str, float]:
+        loop = asyncio.get_running_loop()
+        start = time.perf_counter()
+        done_future: asyncio.Future[Tuple[str, float]] = loop.create_future()
+
+        async def on_new_message(event: events.NewMessage.Event) -> None:
+            text = (event.raw_text or '').strip()
+            if text and not done_future.done():
+                done_future.set_result((text, time.perf_counter() - start))
+
+        event_filter = events.NewMessage(chats=[chat_id])
+        self.client.add_event_handler(on_new_message, event_filter)
+        try:
+            return await asyncio.wait_for(done_future, timeout=timeout)
+        finally:
+            self.client.remove_event_handler(on_new_message, event_filter)
+
     async def _query_botfind(self, target: str) -> Tuple[str, Optional[str], Optional[str], float]:
         started = time.perf_counter()
         try:
-            async with self.client.conversation(BOT_A, timeout=MAX_BOT_WAIT_S) as conv:
-                await conv.send_message(target)
-                first = await conv.get_response()
-                first_text = first.raw_text or ''
+            await self.client.send_message(BOT_A, target)
+            text, sec_a = await self._listen_first_text(BOT_A_ID, MAX_BOT_WAIT_S)
 
-                wait_until = self._extract_wait_time(first_text)
-                retry_after = self._extract_countdown(first_text)
-                if wait_until or retry_after:
-                    return '', wait_until, retry_after, time.perf_counter() - started
+            wait_until = self._extract_wait_time(text)
+            retry_after = self._extract_countdown(text)
+            parsed = self._apply_regex_enrichment('a', text)
 
-                if self._has_id_marker(first_text):
-                    return first_text, None, None, time.perf_counter() - started
-
-                await self._click_telegram_button(first)
-                final = await conv.get_response()
-                final_text = final.raw_text or first_text
-                wait_until = self._extract_wait_time(final_text)
-                retry_after = self._extract_countdown(final_text)
-                if wait_until or retry_after:
-                    return '', wait_until, retry_after, time.perf_counter() - started
-                return final_text, None, None, time.perf_counter() - started
+            if wait_until or retry_after:
+                return '', wait_until, retry_after, sec_a
+            return parsed, None, None, sec_a
         except asyncio.TimeoutError:
             return 'Timeout su Bot A.', None, None, time.perf_counter() - started
         except (UserIsBlockedError, ChatWriteForbiddenError):
@@ -119,6 +127,24 @@ class ResolverClient:
             return f'Flood wait Bot A: {exc.seconds}s.', None, None, time.perf_counter() - started
         except Exception as exc:  # noqa: BLE001
             return f'Errore Bot A: {exc}', None, None, time.perf_counter() - started
+
+    async def _query_wow(self, target: str) -> Tuple[str, float]:
+        started = time.perf_counter()
+        try:
+            entity = await self.client.get_entity(BOT_B)
+            bot_b_id = entity.id
+            await self.client.send_message(entity, target)
+            text, sec_b = await self._listen_first_text(bot_b_id, MAX_BOT_WAIT_S)
+            parsed = self._apply_regex_enrichment('b', text)
+            return parsed, sec_b
+        except asyncio.TimeoutError:
+            return 'Timeout su Bot B.', time.perf_counter() - started
+        except (UserIsBlockedError, ChatWriteForbiddenError):
+            return 'Bot B bloccato o non scrivibile.', time.perf_counter() - started
+        except FloodWaitError as exc:
+            return f'Flood wait Bot B: {exc.seconds}s.', time.perf_counter() - started
+        except Exception as exc:  # noqa: BLE001
+            return f'Errore Bot B: {exc}', time.perf_counter() - started
 
     @staticmethod
     def _extract_wait_time(text: str) -> Optional[str]:
@@ -131,51 +157,29 @@ class ResolverClient:
         return match.group(1) if match else None
 
     @staticmethod
-    def _has_id_marker(text: str) -> bool:
-        lowered = (text or '').lower()
-        return 'id:' in lowered or 'search by telegram id' in lowered
+    def _apply_regex_enrichment(source: str, text: str) -> str:
+        payload = text or ''
 
-    async def _click_telegram_button(self, message: Message) -> None:
-        if not message.buttons:
-            return
-        for row in message.buttons:
-            for button in row:
-                if 'telegram' in (button.text or '').lower():
-                    await message.click(text=button.text)
-                    return
+        if source == 'a':
+            found_id = re.search(r'(?im)\bID\s*:\s*(\d+)', payload)
+            found_phone = re.search(r'(?is)(?:Телефон\s*:|📞\s*)(\d{10,})', payload)
+            parts = []
+            if found_id:
+                parts.append(f'ID: {found_id.group(1)}')
+            if found_phone:
+                parts.append(f'📞 Телефон: {found_phone.group(1)}')
+            if parts:
+                return '\n'.join(parts) + '\n' + payload
+            return payload
 
-    async def _query_wow(self, target: str) -> Tuple[str, float]:
-        started = time.perf_counter()
-        loop = asyncio.get_running_loop()
-        done_future: asyncio.Future[str] = loop.create_future()
-
-        try:
-            entity = await self.client.get_entity(BOT_B)
-            async with self.client.conversation(entity, timeout=MAX_BOT_WAIT_S) as conv:
-                await conv.send_message(target)
-
-                def on_edited(event: events.MessageEdited.Event) -> None:
-                    text = (event.raw_text or '').strip()
-                    if text and self._has_id_marker(text) and not done_future.done():
-                        done_future.set_result(text)
-
-                event_filter = events.MessageEdited(chats=entity)
-                self.client.add_event_handler(on_edited, event_filter)
-                try:
-                    first = await conv.get_response()
-                    first_text = first.raw_text or ''
-                    if self._has_id_marker(first_text):
-                        return first_text, time.perf_counter() - started
-
-                    result = await asyncio.wait_for(done_future, timeout=MAX_BOT_WAIT_S)
-                    return result, time.perf_counter() - started
-                finally:
-                    self.client.remove_event_handler(on_edited, event_filter)
-        except asyncio.TimeoutError:
-            return 'Timeout su Bot B.', time.perf_counter() - started
-        except (UserIsBlockedError, ChatWriteForbiddenError):
-            return 'Bot B bloccato o non scrivibile.', time.perf_counter() - started
-        except FloodWaitError as exc:
-            return f'Flood wait Bot B: {exc.seconds}s.', time.perf_counter() - started
-        except Exception as exc:  # noqa: BLE001
-            return f'Errore Bot B: {exc}', time.perf_counter() - started
+        found_search = re.search(r'(?im)^\s*Search\s+by\s+Telegram\s+ID\s+.*?(\d+)\s*$', payload)
+        found_registered = re.search(r'(?is)Registered\s*\n\s*([^\n\r]+)', payload)
+        parts = []
+        if found_search:
+            parts.append(f'Search by Telegram ID {found_search.group(1)}')
+        if found_registered:
+            parts.append('Registered')
+            parts.append(found_registered.group(1).strip())
+        if parts:
+            return '\n'.join(parts) + '\n' + payload
+        return payload
