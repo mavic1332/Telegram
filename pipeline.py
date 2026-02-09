@@ -25,4 +25,7 @@ class SearchPipeline:
         except asyncio.TimeoutError:
             raw = RawBotResponses(botfindinformation='Timeout su Bot A.', wow_myai='Timeout su Bot B.')
         elapsed = max(1, now_ms() - started)
-        return build_report(raw, elapsed_ms=elapsed, target=target)
+        result = build_report(raw, elapsed_ms=elapsed, target=target)
+        if progress_cb:
+            await progress_cb('parsed')
+        return result

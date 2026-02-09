@@ -59,7 +59,7 @@ async def _run_with_progress(
         stage_map = {
             'bot_a_clicked': (20, 'Interazione Bot A... 20%'),
             'bot_a': (50, 'Dati Bot A ricevuti... 50%'),
-            'bot_b': (100, 'Completato 100%'),
+            'bot_b': (90, 'Dati Bot B ricevuti... 90%'),
             'parsed': (100, 'Completato 100%'),
         }
         data = stage_map.get(stage)
@@ -75,6 +75,8 @@ async def _run_with_progress(
     result = await pipeline.run(target, mode=mode, progress_cb=progress_cb)
     total_s = asyncio.get_running_loop().time() - started
 
+    if last_percent < 100:
+        await progress_cb('parsed')
     await message.answer('\n'.join(result.lines), reply_markup=_result_keyboard(target))
 
     logging.info(f"[{ts_hms()}] [USER: {_username(message)}] searched for: [{target}]")

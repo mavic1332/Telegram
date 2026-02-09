@@ -58,18 +58,34 @@ def _extract_bot_b_id(text: str) -> Optional[str]:
 
 
 def _extract_bot_b_registered(text: str) -> Optional[str]:
-    # only first logical line after Registered, never whole message
-    match = re.search(r'(?is)Registered\s*\n\s*([^\n\r]+)', text)
+    match = re.search(r'(?is)Registered\s*\n\s*(.*?)(?:\n\s*🤖\s*Bots\b|$)', text)
     if not match:
         return None
-    value = match.group(1).strip()
-    if 'search by telegram id' in value.lower():
+    block = match.group(1)
+    lines = [ln.strip() for ln in re.split(r'\r?\n', block) if ln.strip()]
+    if not lines:
         return None
-    return _to_it_month(value)
+    return _to_it_month(', '.join(lines))
+
+
+def _extract_bot_b_bots_summary(text: str) -> list[str]:
+    match = re.search(r'(?is)🤖\s*Bots\s*(.*)$', text)
+    if not match:
+        return []
+    lines = [ln.strip('•- \t>') for ln in re.split(r'\r?\n', match.group(1)) if ln.strip()]
+    out: list[str] = []
+    for line in lines:
+        if ':' in line:
+            out.append(line)
+    return out
+
+
+def _extract_blockquote_usernames(text: str) -> list[str]:
+    quote_lines = re.findall(r'(?im)^\s*>\s*(.+)$', text)
+    return re.findall(r'@[A-Za-z0-9_]{3,}', '\n'.join(quote_lines))
 
 
 def _extract_bot_a_phone(text: str) -> Optional[str]:
-    # Entity-safe capture from line that starts with Телефон: or 📞
     line_match = re.search(r'(?im)^.*(?:Телефон:|📞)\s*([^\n\r]+)$', text)
     if not line_match:
         return None
@@ -94,7 +110,6 @@ def _extract_bot_a_history(text: str) -> list[str]:
 
 
 def _extract_bot_a_groups(text: str) -> list[str]:
-    # robust for quote blocks and multiline sections
     match = re.search(r'(?is)👥\s*Группы\s*:\s*(.*?)(?:\n\s*(?:📖|🕓|📞|💬|$))', text)
     if not match:
         return []
@@ -127,8 +142,15 @@ def build_report(raw: RawBotResponses, elapsed_ms: int, target: str) -> SearchRe
     final_registration = _extract_bot_b_registered(bot_b) or 'N/D'
 
     groups = _extract_bot_a_groups(bot_a)
-    history = _dedupe(_extract_bot_a_history(bot_a) + groups)
-    dati = f"Gruppi: {', '.join(groups)}" if groups else 'N/D'
+    quote_users = _extract_blockquote_usernames(bot_a + '\n' + bot_b)
+    bot_b_summary = _extract_bot_b_bots_summary(bot_b)
+
+    data_items = _dedupe(bot_b_summary)
+    if groups or quote_users:
+        data_items.append(f"Gruppi: {', '.join(_dedupe(groups + quote_users))}")
+
+    history = _dedupe(_extract_bot_a_history(bot_a) + groups + quote_users)
+    dati = ' | '.join(data_items) if data_items else 'N/D'
 
     lines = [
         '✅ Tipo risultato: Aggregato Test1',
