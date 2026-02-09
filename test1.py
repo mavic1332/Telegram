@@ -12,14 +12,31 @@ from telethon.errors import (
 )
 
 ENV_FILE = Path('.env')
+ENV_TEMPLATE_FILE = Path('.env.example')
 SESSION_NAME = 'test1'
 TARGET_BOTS = ['@Botfindinformation_bot', '@WOW_MYAI_BOT']
 COMMAND_PATTERN = re.compile(r'^/')
 REQUEST_PATTERN = re.compile(r'(@[A-Za-z0-9_]{5,}|\b\d{5,}\b)')
 
 
+def ensure_runtime_files() -> None:
+    """Create runtime files required to start the script."""
+    if not ENV_TEMPLATE_FILE.exists():
+        ENV_TEMPLATE_FILE.write_text(
+            'API_ID=\n'
+            'API_HASH=\n'
+            'PHONE_NUMBER=\n'
+            'OWNER_ID=\n',
+            encoding='utf-8',
+        )
+
+    if not ENV_FILE.exists():
+        ENV_FILE.write_text(ENV_TEMPLATE_FILE.read_text(encoding='utf-8'), encoding='utf-8')
+
+
 def ensure_credentials() -> Dict[str, str]:
     """Load credentials from .env and prompt for missing values."""
+    ensure_runtime_files()
     load_dotenv(ENV_FILE)
     existing = dotenv_values(ENV_FILE)
 
@@ -37,7 +54,6 @@ def ensure_credentials() -> Dict[str, str]:
             set_key(str(ENV_FILE), key, value)
             existing[key] = value
 
-    # Optional override if needed for command filtering
     if not existing.get('OWNER_ID'):
         set_key(str(ENV_FILE), 'OWNER_ID', '')
 
