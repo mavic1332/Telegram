@@ -1,96 +1,151 @@
 import re
-from typing import Iterable, List
+from typing import List, Optional
 
 from models import RawBotResponses, SearchResult
 
-SOURCE_PATTERNS = [
-    r'@Botfindinformation_bot',
-    r'@WOW_MYAI_BOT',
-    r'@UniversalSearch',
-    r'fake\s+generator\s+bot',
-    r'(?im)^\s*by\s+.*$',
-    r'(?im)^.*powered\s+by.*$',
-    r'(?im)^.*join\s+channel.*$',
-    r'https?://t\.me/\S+',
-]
-CYRILLIC_RE = re.compile(r'[\u0400-\u04FF]')
-MONTH_MAP = {
-    'january': '01', 'february': '02', 'march': '03', 'april': '04', 'may': '05', 'june': '06',
-    'july': '07', 'august': '08', 'september': '09', 'october': '10', 'november': '11', 'december': '12',
+CYRILLIC_WORD_RE = re.compile(r'[а-яА-Я]+')
+HEADER_ID_RE = re.compile(
+    r'Search\s+by\s+Telegram\s+ID[^\d]*(\d{7,10})',
+    flags=re.IGNORECASE,
+)
+REGISTERED_RE = re.compile(r'Registered\s*[:\]]?\s*([^\n\r]+)', flags=re.IGNORECASE)
+MONTH_IT = {
+    'january': 'Gennaio',
+    'february': 'Febbraio',
+    'march': 'Marzo',
+    'april': 'Aprile',
+    'may': 'Maggio',
+    'june': 'Giugno',
+    'july': 'Luglio',
+    'august': 'Agosto',
+    'september': 'Settembre',
+    'october': 'Ottobre',
+    'november': 'Novembre',
+    'december': 'Dicembre',
 }
 
 
-def _translate_status(line: str) -> str:
-    lowered = line.lower()
-    if any(x in lowered for x in ('not found', 'не найден', 'не найдено', 'нет данных')):
-        return 'Nessun dato trovato'
-    if any(x in lowered for x in ('limit reached', 'лимит', 'достигнут лимит')):
-        return 'Limite raggiunto'
-    return line
+def _strip_noise(text: str) -> str:
+    cleaned = text or ''
+    for pat in (
+        r'@Botfindinformation_bot',
+        r'@WOW_MYAI_BOT',
+        r'@UniversalSearch',
+        r'fake\s+generator\s+bot',
+        r'(?im)^\s*by\s+.*$',
+        r'(?im)^.*powered\s+by.*$',
+        r'(?im)^.*join\s+channel.*$',
+        r'https?://t\.me/\S+',
+    ):
+        cleaned = re.sub(pat, '', cleaned, flags=re.IGNORECASE)
+    return re.sub(r'\n{3,}', '\n\n', cleaned).strip()
 
 
-def _normalize_registration(line: str) -> str:
-    match = re.search(r'registered\s*[:\[]?\s*([A-Za-z]+)\s+(\d{4})\]?', line, flags=re.IGNORECASE)
-    if not match:
-        return line
-    month = MONTH_MAP.get(match.group(1).lower())
-    if not month:
-        return line
-    return f'Registrazione: {month}/{match.group(2)}'
+def _translate_registered(value: str) -> str:
+    text = value.strip(' []')
+    for en, it in MONTH_IT.items():
+        text = re.sub(rf'\b{en}\b', it, text, flags=re.IGNORECASE)
+    return text
 
 
-def _sanitize(text: str) -> str:
-    cleaned = text
-    for pattern in SOURCE_PATTERNS:
-        cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
-    cleaned = CYRILLIC_RE.sub('', cleaned)
-    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
-    return cleaned.strip()
+def _extract_bot_b(raw_b: str) -> tuple[Optional[str], Optional[str], List[str]]:
+    text = _strip_noise(raw_b)
+    found_id = None
+    registered = None
+    history: List[str] = []
 
+    m_id = HEADER_ID_RE.search(text)
+    if m_id:
+        found_id = m_id.group(1)
 
-def _dedupe(lines: Iterable[str]) -> List[str]:
-    seen = set()
-    output: List[str] = []
-    for raw in lines:
-        line = _translate_status(_normalize_registration(raw.strip('•- \t')))
+    m_reg = REGISTERED_RE.search(text)
+    if m_reg:
+        registered = _translate_registered(m_reg.group(1))
+
+    for line in text.splitlines():
+        line = line.strip('•- \t')
         if not line:
             continue
-        key = re.sub(r'\s+', ' ', line).lower().strip()
+        low = line.lower()
+        if 'search by telegram id' in low or 'registered' in low:
+            continue
+        history.append(line)
+    return found_id, registered, history
+
+
+def _section_between(text: str, start_anchor: str, stop_anchors: tuple[str, ...]) -> List[str]:
+    start = text.find(start_anchor)
+    if start == -1:
+        return []
+    chunk = text[start + len(start_anchor):]
+    stop_idx = len(chunk)
+    for stop in stop_anchors:
+        idx = chunk.find(stop)
+        if idx != -1:
+            stop_idx = min(stop_idx, idx)
+    body = chunk[:stop_idx]
+    return [ln.strip('•- \t') for ln in body.splitlines() if ln.strip()]
+
+
+def _extract_bot_a(raw_a: str) -> tuple[Optional[str], Optional[str], Optional[str], List[str], List[str]]:
+    text = _strip_noise(raw_a)
+
+    id_match = re.search(r'💬\s*ID\s*:\s*(\d+)', text)
+    phone_match = re.search(r'📞\s*Телефон\s*:\s*([^\n\r]+)', text)
+    links_match = re.search(r'📖\s*Контактные\s*связи\s*:\s*([^\n\r]+)', text)
+
+    id_val = id_match.group(1).strip() if id_match else None
+    phone_val = phone_match.group(1).strip() if phone_match else None
+    links_val = links_match.group(1).strip() if links_match else None
+
+    history = _section_between(text, '🕓 История изменения имени', ('👥 Группы', '📖 Контактные связи', '📞 Телефон'))
+    groups = _section_between(text, '👥 Группы', ('🕓 История изменения имени', '📖 Контактные связи', '📞 Телефон'))
+    groups = [g for g in groups if g.startswith('@') or 'http' not in g.lower()]
+
+    return id_val, phone_val, links_val, history, groups
+
+
+def _clean_final(line: str) -> str:
+    no_cyr = CYRILLIC_WORD_RE.sub('', line)
+    no_cyr = re.sub(r'\s{2,}', ' ', no_cyr).strip(' :-')
+    return no_cyr.strip()
+
+
+def _dedupe(values: List[str]) -> List[str]:
+    seen = set()
+    out: List[str] = []
+    for value in values:
+        v = _clean_final(value)
+        if not v:
+            continue
+        key = v.lower()
         if key in seen:
             continue
         seen.add(key)
-        output.append(line)
-    return output
-
-
-def _pick(lines: List[str], *keys: str) -> str:
-    for line in lines:
-        lower = line.lower()
-        if any(k in lower for k in keys):
-            return line
-    return 'N/D'
-
-
-def _status(raw: RawBotResponses, lines: List[str]) -> str:
-    if raw.bot_a_retry_after or raw.bot_a_wait_until:
-        return '!'
-    if not lines:
-        return '-'
-    return '+'
+        out.append(v)
+    return out
 
 
 def build_report(raw: RawBotResponses, elapsed_ms: int, target: str) -> SearchResult:
-    merged = _sanitize('\n'.join(raw.as_dict().values()))
-    lines = _dedupe(merged.splitlines())
+    id_a, phone_a, links_a, history_a, groups_a = _extract_bot_a(raw.botfindinformation)
+    id_b, reg_b, history_b = _extract_bot_b(raw.wow_myai)
+
+    merged_history = _dedupe(history_a + groups_a + history_b)
+    dati = _dedupe([links_a] if links_a else [])
+    if groups_a:
+        dati.extend(_dedupe([f'Gruppi: {", ".join(groups_a)}']))
+
+    final_id = id_a or id_b or 'N/D'
+    final_reg = _clean_final(reg_b) if reg_b else 'N/D'
+    final_phone = _clean_final(phone_a) if phone_a else 'N/D'
 
     summary = [
         '✅ Tipo risultato: Aggregato Test1',
         f'👤 Identificatore: {target}',
-        f'🆔 ID: {_pick(lines, " id", "id:", "telegram id")}',
-        f'🗓️ Registrazione: {_pick(lines, "registr")}',
-        f'👱 Nome: {_pick(lines, "nome", "name")}',
-        f'📞 Telefono: {_pick(lines, "phone", "telefono")}',
-        f'📊 Dati: {_pick(lines, "call", "ticket", "payment", "pagament")}',
+        f'🆔 ID: {final_id}',
+        f'🗓️ Registrazione: {final_reg}',
+        f'📞 Telefono: {final_phone}',
+        f'📊 Dati: {" | ".join(dati) if dati else "N/D"}',
     ]
 
     if raw.bot_a_retry_after:
@@ -98,15 +153,24 @@ def build_report(raw: RawBotResponses, elapsed_ms: int, target: str) -> SearchRe
     elif raw.bot_a_wait_until:
         summary.append(f'⚠️ Bot A non disponibile fino alle {raw.bot_a_wait_until}')
 
+    storico = _dedupe(merged_history)[:12]
     summary.append('🕒 Storico:')
-    history = [f'• {line}' for line in lines[:12]] or ['• Nessun dato disponibile']
+    summary.extend([f'• {s}' for s in storico] or ['• Nessun dato disponibile'])
+    summary.append(f'\n⏱️ Tempo elaborazione: {elapsed_ms} ms')
 
-    report_lines = summary + history + [f'\n⏱️ Tempo elaborazione: {elapsed_ms} ms']
+    status = '!'
+    if final_id != 'N/D' or final_phone != 'N/D' or storico:
+        status = '+'
+    elif raw.bot_a_retry_after or raw.bot_a_wait_until:
+        status = '!'
+    else:
+        status = '-'
+
     return SearchResult(
         target=target,
-        lines=report_lines,
+        lines=[_clean_final(line) for line in summary],
         elapsed_ms=elapsed_ms,
-        status=_status(raw, lines),
+        status=status,
         bot_a_seconds=raw.bot_a_seconds,
         bot_b_seconds=raw.bot_b_seconds,
     )
