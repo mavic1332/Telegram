@@ -1,11 +1,12 @@
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 @dataclass
 class RawBotResponses:
-    botfindinformation: str
-    wow_myai: str
+    botfindinformation: str = ''
+    wow_myai: str = ''
+    bot_a_wait_until: Optional[str] = None
 
     def as_dict(self) -> Dict[str, str]:
         return {

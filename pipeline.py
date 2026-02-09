@@ -8,8 +8,8 @@ class SearchPipeline:
     def __init__(self, resolver: ResolverClient) -> None:
         self.resolver = resolver
 
-    async def run(self, target: str) -> SearchResult:
+    async def run(self, target: str, mode: str = 'all') -> SearchResult:
         started = now_ms()
-        raw = await self.resolver.fetch_info(target)
+        raw = await self.resolver.fetch_info(target, mode=mode)
         elapsed = max(1, now_ms() - started)
-        return build_report(raw.as_dict(), elapsed_ms=elapsed, target=target)
+        return build_report(raw, elapsed_ms=elapsed, target=target)
