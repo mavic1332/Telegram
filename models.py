@@ -10,6 +10,7 @@ class RawBotResponses:
     bot_a_retry_after: Optional[str] = None
     bot_a_seconds: Optional[float] = None
     bot_b_seconds: Optional[float] = None
+    bot_a_phone: Optional[str] = None
 
     def as_dict(self) -> Dict[str, str]:
         return {

@@ -14,7 +14,6 @@ BOT_A = '@Botfindinformation_bot'
 BOT_B = '@WOW_MYAI_BOT'
 BOT_A_ID = 8585975791
 MAX_BOT_WAIT_S = 180
-BOT_A_SOFT_TIMEOUT_S = 5
 WAIT_UNTIL_RE = re.compile(r'new\s+requests\s+will\s+be\s+granted\s+at\s*(\d{1,2}:\d{2})', re.IGNORECASE)
 COUNTDOWN_RE = re.compile(r'\b(\d{2}:\d{2})\b')
 ProgressCb = Optional[Callable[[str], Awaitable[None]]]
@@ -29,6 +28,7 @@ class ResolverClient:
 
     def __post_init__(self) -> None:
         self.client = TelegramClient(self.session_name, self.api_id, self.api_hash)
+        self._phone_cache: dict[str, str] = {}
 
     async def start(self) -> None:
         await self.client.start(phone=self.phone)
@@ -39,13 +39,19 @@ class ResolverClient:
     async def fetch_info(self, target: str, mode: str = 'all', progress_cb: ProgressCb = None) -> RawBotResponses:
         if mode == 'bot_a':
             text_a, wait_a, retry_after, sec_a = await self._query_botfind(target, progress_cb=progress_cb)
-            return RawBotResponses(botfindinformation=text_a, bot_a_wait_until=wait_a, bot_a_retry_after=retry_after, bot_a_seconds=sec_a)
+            return RawBotResponses(
+                botfindinformation=text_a,
+                bot_a_wait_until=wait_a,
+                bot_a_retry_after=retry_after,
+                bot_a_seconds=sec_a,
+                bot_a_phone=self._phone_cache.get(target),
+            )
 
         if mode == 'bot_b':
             text_b, sec_b = await self._query_wow(target, progress_cb=progress_cb)
-            return RawBotResponses(wow_myai=text_b, bot_b_seconds=sec_b)
+            return RawBotResponses(wow_myai=text_b, bot_b_seconds=sec_b, bot_a_phone=self._phone_cache.get(target))
 
-        task_a = asyncio.create_task(asyncio.wait_for(self._query_botfind(target, progress_cb=progress_cb), timeout=BOT_A_SOFT_TIMEOUT_S))
+        task_a = asyncio.create_task(self._query_botfind(target, progress_cb=progress_cb))
         task_b = asyncio.create_task(self._query_wow(target, progress_cb=progress_cb))
 
         text_a, wait_a, retry_after, sec_a = ('Timeout su Bot A.', None, None, None)
@@ -61,7 +67,7 @@ class ResolverClient:
                     result = completed.result()
                 except Exception:
                     if completed is task_a:
-                        text_a, wait_a, retry_after, sec_a = ('Timeout su Bot A.', None, None, BOT_A_SOFT_TIMEOUT_S)
+                        text_a, wait_a, retry_after, sec_a = ('Timeout su Bot A.', None, None, MAX_BOT_WAIT_S)
                     continue
 
                 if completed is task_a:
@@ -83,6 +89,7 @@ class ResolverClient:
             bot_a_retry_after=retry_after,
             bot_a_seconds=sec_a,
             bot_b_seconds=sec_b,
+            bot_a_phone=self._phone_cache.get(target),
         )
 
     async def _listen_first_text(self, chat_id: int, timeout: int, predicate: Optional[Callable[[str], bool]] = None) -> Tuple[str, float]:
@@ -142,6 +149,9 @@ class ResolverClient:
                 wait_until = self._extract_wait_time(result_text)
                 retry_after = self._extract_countdown(result_text)
                 parsed = self._apply_regex_enrichment('a', result_text)
+                cached_phone = self._extract_phone(parsed)
+                if cached_phone:
+                    self._phone_cache[target] = cached_phone
 
                 if progress_cb:
                     await progress_cb('bot_a')
@@ -193,6 +203,16 @@ class ResolverClient:
     def _extract_countdown(text: str) -> Optional[str]:
         match = COUNTDOWN_RE.search(text or '')
         return match.group(1) if match else None
+
+    @staticmethod
+    def _extract_phone(text: str) -> Optional[str]:
+        line = re.search(r'(?im)^.*(?:Телефон\s*:|📞)\s*([^\n\r]+)$', text or '')
+        if line:
+            match = re.search(r'(\d{10,13})', line.group(1))
+            if match:
+                return match.group(1)
+        fallback = re.search(r'(?<!\d)(\d{10,13})(?!\d)', text or '')
+        return fallback.group(1) if fallback else None
 
     @staticmethod
     def _apply_regex_enrichment(source: str, text: str) -> str:

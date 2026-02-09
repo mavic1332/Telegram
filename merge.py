@@ -185,19 +185,24 @@ def build_report(raw: RawBotResponses, elapsed_ms: int, target: str) -> SearchRe
     bot_b = _strip_noise(raw.wow_myai)
 
     final_id = _extract_bot_a_id(bot_a) or _extract_bot_b_id(bot_b) or 'N/D'
-    final_phone = _extract_bot_a_phone(bot_a) or _extract_fallback_phone(bot_b) or 'N/D'
+    final_phone = raw.bot_a_phone or _extract_bot_a_phone(bot_a) or _extract_fallback_phone(bot_b) or 'N/D'
     final_registration = _extract_bot_b_registered(bot_b) or _extract_fallback_registration(bot_a) or 'N/D'
 
     groups = _extract_bot_a_groups(bot_a)
     quote_users = _extract_blockquote_usernames(bot_a + '\n' + bot_b)
     bot_b_summary = _extract_bot_b_bots_summary(bot_b)
 
-    data_items = _dedupe(bot_b_summary)
-    if groups or quote_users:
-        data_items.append(f"Gruppi: {', '.join(_dedupe(groups + quote_users))}")
+    bot_items = _dedupe(bot_b_summary)
+    group_items = _dedupe(groups + quote_users)
+
+    data_parts: list[str] = []
+    if group_items:
+        data_parts.append(f"Groups: {', '.join(group_items)}")
+    if bot_items:
+        data_parts.append(f"Bots: {' | '.join(bot_items)}")
 
     history = _dedupe(_extract_bot_a_history(bot_a) + groups + quote_users)
-    dati = ' | '.join(data_items) if data_items else 'N/D'
+    dati = ' | '.join(data_parts) if data_parts else 'N/D'
 
     lines = [
         '✅ Tipo risultato: Aggregato Test1',
