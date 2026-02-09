@@ -46,17 +46,11 @@ class ResolverClient:
             text_b, sec_b = await self._query_wow(target)
             return RawBotResponses(wow_myai=text_b, bot_b_seconds=sec_b)
 
-        try:
-            results = await asyncio.gather(
-                self._query_botfind(target),
-                self._query_wow(target),
-                return_exceptions=True,
-            )
-        except asyncio.TimeoutError:
-            return RawBotResponses(
-                botfindinformation='Timeout su Bot A.',
-                wow_myai='Timeout su Bot B.',
-            )
+        results = await asyncio.gather(
+            self._query_botfind(target),
+            self._query_wow(target),
+            return_exceptions=True,
+        )
 
         bot_a_result = results[0]
         bot_b_result = results[1]
@@ -96,6 +90,10 @@ class ResolverClient:
                 if wait_until or retry_after:
                     return '', wait_until, retry_after, time.perf_counter() - started
 
+                # Early exit: if payload already contains ID marker, don't wait for full timeout.
+                if self._has_id_marker(first_text):
+                    return first_text, None, None, time.perf_counter() - started
+
                 await self._click_telegram_button(first)
                 final = await conv.get_response()
                 final_text = final.raw_text or first_text
@@ -123,6 +121,11 @@ class ResolverClient:
         match = COUNTDOWN_RE.search(text or '')
         return match.group(1) if match else None
 
+    @staticmethod
+    def _has_id_marker(text: str) -> bool:
+        lowered = (text or '').lower()
+        return 'id:' in lowered or 'search by telegram id' in lowered
+
     async def _click_telegram_button(self, message: Message) -> None:
         if not message.buttons:
             return
@@ -144,13 +147,17 @@ class ResolverClient:
 
                 def on_edited(event: events.MessageEdited.Event) -> None:
                     text = (event.raw_text or '').strip()
-                    if text and self._is_final_wow_text(text) and not done_future.done():
+                    if text and self._has_id_marker(text) and not done_future.done():
                         done_future.set_result(text)
 
                 event_filter = events.MessageEdited(chats=entity)
                 self.client.add_event_handler(on_edited, event_filter)
                 try:
-                    await conv.get_response()
+                    first = await conv.get_response()
+                    first_text = first.raw_text or ''
+                    if self._has_id_marker(first_text):
+                        return first_text, time.perf_counter() - started
+
                     result = await asyncio.wait_for(done_future, timeout=MAX_BOT_WAIT_S)
                     return result, time.perf_counter() - started
                 finally:
@@ -163,9 +170,3 @@ class ResolverClient:
             return f'Flood wait Bot B: {exc.seconds}s.', time.perf_counter() - started
         except Exception as exc:  # noqa: BLE001
             return f'Errore Bot B: {exc}', time.perf_counter() - started
-
-    @staticmethod
-    def _is_final_wow_text(text: str) -> bool:
-        has_progress = re.search(r'\b\d{1,3}%\b', text)
-        has_fields = any(k in text.lower() for k in ('id', 'nome', 'telefono', 'phone', 'registr', 'registered'))
-        return (not has_progress) and has_fields
