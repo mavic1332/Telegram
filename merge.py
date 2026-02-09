@@ -18,6 +18,9 @@ MONTH_MAP_IT = {
     'december': 'Dicembre',
 }
 CYRILLIC_RE = re.compile(r'[\u0400-\u04FF]+')
+DATE_LINE_RE = re.compile(
+    r'(?i)\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{4}\b'
+)
 
 
 def _strip_noise(text: str) -> str:
@@ -58,25 +61,38 @@ def _extract_bot_b_id(text: str) -> Optional[str]:
 
 
 def _extract_bot_b_registered(text: str) -> Optional[str]:
-    key_match = re.search(r'(?im)^\s*🔑\s*([^\n\r🤖]+)', text)
-    if key_match:
-        value = key_match.group(1).strip()
-        if value and 'search by telegram id' not in value.lower():
-            return _to_it_month(value)
+    block_match = re.search(r'(?is)\bRegistered\b\s*:?\s*(.*?)(?:\n\s*🤖\s*Bots\b|$)', text)
+    if not block_match:
+        key_match = re.search(r'(?im)^\s*🔑\s*([^\n\r🤖]+)', text)
+        if not key_match:
+            return None
+        candidate = key_match.group(1).strip()
+        if not candidate:
+            return None
+        if 'search by telegram id' in candidate.lower() or re.search(r'\b\d{7,10}\b', candidate):
+            return None
+        return _to_it_month(candidate)
 
-    reg_inline = re.search(r'(?im)^\s*Registered\s*[:\-]?\s*([^\n\r🤖]+)', text)
-    if reg_inline:
-        value = reg_inline.group(1).strip()
-        if value and 'search by telegram id' not in value.lower():
-            return _to_it_month(value)
+    block = block_match.group(1)
+    lines = [ln.strip() for ln in re.split(r'\r?\n', block) if ln.strip()]
+    dates: list[str] = []
+    for line in lines:
+        lowered = line.lower()
+        if 'search by telegram id' in lowered:
+            continue
+        if re.fullmatch(r'\d{7,10}', re.sub(r'\D', '', line)):
+            continue
+        dates.extend(match.group(0) for match in DATE_LINE_RE.finditer(line))
+        if not DATE_LINE_RE.search(line) and re.search(r'(?i)\b\w+\s+\d{4}\b', line):
+            dates.append(line)
 
-    reg_next = re.search(r'(?is)Registered\s*\n\s*([^\n\r🤖]+)', text)
-    if reg_next:
-        value = reg_next.group(1).strip()
-        if value and 'search by telegram id' not in value.lower():
-            return _to_it_month(value)
+    if not dates:
+        return None
 
-    return None
+    normalized: list[str] = []
+    for date in dates:
+        normalized.append(_to_it_month(date))
+    return ', '.join(_dedupe(normalized)) if normalized else None
 
 
 def _extract_bot_b_bots_summary(text: str) -> list[str]:
@@ -85,6 +101,11 @@ def _extract_bot_b_bots_summary(text: str) -> list[str]:
         return []
     lines = [ln.strip('•- \t>') for ln in re.split(r'\r?\n', match.group(1)) if ln.strip()]
     out: list[str] = []
+    for line in lines:
+        if ':' in line and re.search(r'(?i)\b(telescan|telesint|unamer|fstat)\b', line):
+            out.append(line)
+    if out:
+        return out
     for line in lines:
         if ':' in line:
             out.append(line)
@@ -97,11 +118,26 @@ def _extract_blockquote_usernames(text: str) -> list[str]:
 
 
 def _extract_bot_a_phone(text: str) -> Optional[str]:
-    line_match = re.search(r'(?im)^.*(?:Телефон:|📞)\s*([^\n\r]+)$', text)
+    line_match = re.search(r'(?im)^.*Телефон\s*:\s*([^\n\r]+)$', text)
+    if not line_match:
+        line_match = re.search(r'(?im)^.*📞\s*([^\n\r]+)$', text)
     if not line_match:
         return None
-    candidates = re.findall(r'\d{10,13}', line_match.group(1))
+    candidates = re.findall(r'(\d{10,13})', line_match.group(1))
     return candidates[0] if candidates else None
+
+
+def _extract_fallback_phone(text: str) -> Optional[str]:
+    match = re.search(r'(?<!\d)(\d{10,13})(?!\d)', text)
+    return match.group(1) if match else None
+
+
+def _extract_fallback_registration(text: str) -> Optional[str]:
+    match = re.search(r'(?i)\b(registered|registrazione)\b\s*:?\s*([^\n\r]+)', text)
+    if match:
+        return _to_it_month(match.group(2).strip())
+    date = re.search(r'(?i)\b\w+\s+\d{4}\b', text)
+    return _to_it_month(date.group(0)) if date else None
 
 
 def _extract_bot_a_id(text: str) -> Optional[str]:
@@ -149,8 +185,8 @@ def build_report(raw: RawBotResponses, elapsed_ms: int, target: str) -> SearchRe
     bot_b = _strip_noise(raw.wow_myai)
 
     final_id = _extract_bot_a_id(bot_a) or _extract_bot_b_id(bot_b) or 'N/D'
-    final_phone = _extract_bot_a_phone(bot_a) or 'N/D'
-    final_registration = _extract_bot_b_registered(bot_b) or 'N/D'
+    final_phone = _extract_bot_a_phone(bot_a) or _extract_fallback_phone(bot_b) or 'N/D'
+    final_registration = _extract_bot_b_registered(bot_b) or _extract_fallback_registration(bot_a) or 'N/D'
 
     groups = _extract_bot_a_groups(bot_a)
     quote_users = _extract_blockquote_usernames(bot_a + '\n' + bot_b)
@@ -179,7 +215,7 @@ def build_report(raw: RawBotResponses, elapsed_ms: int, target: str) -> SearchRe
 
     lines.append('🕒 Storico:')
     lines.extend([f'• {item}' for item in history] or ['• Nessun dato disponibile'])
-    lines.append(f'\n⏱️ Tempo elaborazione: {elapsed_ms} ms')
+    lines.append(f'⏱️ Tempo elaborazione: {elapsed_ms} ms')
 
     status = '+' if any(x != 'N/D' for x in (final_id, final_phone, final_registration)) else '-'
     if raw.bot_a_retry_after or raw.bot_a_wait_until:
