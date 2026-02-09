@@ -58,22 +58,23 @@ def _extract_bot_b_id(text: str) -> Optional[str]:
 
 
 def _extract_bot_b_registered(text: str) -> Optional[str]:
-    match = re.search(r'(?is)Registered\s*\n\s*(.*?)(?:\n\s*🤖\s*Bots\b|$)', text)
+    # only first logical line after Registered, never whole message
+    match = re.search(r'(?is)Registered\s*\n\s*([^\n\r]+)', text)
     if not match:
         return None
-    block = match.group(1)
-    lines = [ln.strip() for ln in re.split(r'\r?\n', block) if ln.strip()]
-    if not lines:
+    value = match.group(1).strip()
+    if 'search by telegram id' in value.lower():
         return None
-    return _to_it_month(', '.join(lines))
+    return _to_it_month(value)
 
 
 def _extract_bot_a_phone(text: str) -> Optional[str]:
-    match = re.search(r'(?is)(?:Телефон:|📞)\s*([\d,\s]+)', text)
-    if not match:
+    # Entity-safe capture from line that starts with Телефон: or 📞
+    line_match = re.search(r'(?im)^.*(?:Телефон:|📞)\s*([^\n\r]+)$', text)
+    if not line_match:
         return None
-    digits = re.sub(r'\D', '', match.group(1))
-    return digits if digits else None
+    candidates = re.findall(r'\d{10,13}', line_match.group(1))
+    return candidates[0] if candidates else None
 
 
 def _extract_bot_a_id(text: str) -> Optional[str]:
@@ -89,14 +90,17 @@ def _extract_bot_a_history(text: str) -> list[str]:
     if not match:
         return []
     block = match.group(1)
-    return [ln.strip('•- \t') for ln in re.split(r'\r?\n', block) if ln.strip()]
+    return [ln.strip('•- \t>') for ln in re.split(r'\r?\n', block) if ln.strip()]
 
 
 def _extract_bot_a_groups(text: str) -> list[str]:
-    match = re.search(r'(?is)👥\s*Группы\s*:\s*(.*?)(?:\n\s*(?:📖|🕓|📞|$))', text)
+    # robust for quote blocks and multiline sections
+    match = re.search(r'(?is)👥\s*Группы\s*:\s*(.*?)(?:\n\s*(?:📖|🕓|📞|💬|$))', text)
     if not match:
         return []
-    return re.findall(r'@[A-Za-z0-9_]{3,}', match.group(1))
+    block = match.group(1)
+    lines = [ln.strip('> \t') for ln in re.split(r'\r?\n', block) if ln.strip()]
+    return re.findall(r'@[A-Za-z0-9_]{3,}', '\n'.join(lines))
 
 
 def _dedupe(items: list[str]) -> list[str]:
@@ -122,8 +126,9 @@ def build_report(raw: RawBotResponses, elapsed_ms: int, target: str) -> SearchRe
     final_phone = _extract_bot_a_phone(bot_a) or 'N/D'
     final_registration = _extract_bot_b_registered(bot_b) or 'N/D'
 
-    history = _dedupe(_extract_bot_a_history(bot_a) + _extract_bot_a_groups(bot_a))
-    dati = f"Gruppi: {', '.join(_extract_bot_a_groups(bot_a))}" if _extract_bot_a_groups(bot_a) else 'N/D'
+    groups = _extract_bot_a_groups(bot_a)
+    history = _dedupe(_extract_bot_a_history(bot_a) + groups)
+    dati = f"Gruppi: {', '.join(groups)}" if groups else 'N/D'
 
     lines = [
         '✅ Tipo risultato: Aggregato Test1',
