@@ -184,16 +184,16 @@ def build_report(raw: RawBotResponses, elapsed_ms: int, target: str) -> SearchRe
     bot_a = _strip_noise(raw.botfindinformation)
     bot_b = _strip_noise(raw.wow_myai)
 
-    final_id = _extract_bot_a_id(bot_a) or _extract_bot_b_id(bot_b) or 'N/D'
-    final_phone = raw.bot_a_phone or _extract_bot_a_phone(bot_a) or _extract_fallback_phone(bot_b) or 'N/D'
-    final_registration = _extract_bot_b_registered(bot_b) or _extract_fallback_registration(bot_a) or 'N/D'
+    final_id = raw.profile.identifier or _extract_bot_a_id(bot_a) or _extract_bot_b_id(bot_b) or 'N/D'
+    final_phone = raw.profile.phone or raw.bot_a_phone or _extract_bot_a_phone(bot_a) or _extract_fallback_phone(bot_b) or 'N/D'
+    final_registration = raw.profile.registration or _extract_bot_b_registered(bot_b) or _extract_fallback_registration(bot_a) or 'N/D'
 
     groups = _extract_bot_a_groups(bot_a)
     quote_users = _extract_blockquote_usernames(bot_a + '\n' + bot_b)
     bot_b_summary = _extract_bot_b_bots_summary(bot_b)
 
-    bot_items = _dedupe(bot_b_summary)
-    group_items = _dedupe(groups + quote_users)
+    bot_items = _dedupe(raw.profile.bot_data or bot_b_summary)
+    group_items = _dedupe((raw.profile.groups or groups) + quote_users)
 
     data_parts: list[str] = []
     if group_items:
@@ -201,7 +201,7 @@ def build_report(raw: RawBotResponses, elapsed_ms: int, target: str) -> SearchRe
     if bot_items:
         data_parts.append(f"Bots: {' | '.join(bot_items)}")
 
-    history = _dedupe(_extract_bot_a_history(bot_a) + groups + quote_users)
+    history = _dedupe((raw.profile.history or _extract_bot_a_history(bot_a)) + groups + quote_users)
     dati = ' | '.join(data_parts) if data_parts else 'N/D'
 
     lines = [

@@ -8,15 +8,15 @@ from telethon import TelegramClient, events
 from telethon.errors import ChatWriteForbiddenError, FloodWaitError, UserIsBlockedError
 from telethon.tl.custom.message import Message
 
-from models import RawBotResponses
+from models import RawBotResponses, UserProfile
 
 BOT_A = '@Botfindinformation_bot'
 BOT_B = '@WOW_MYAI_BOT'
-BOT_A_ID = 8585975791
-MAX_BOT_WAIT_S = 180
+MAX_BOT_WAIT_S = 60
 WAIT_UNTIL_RE = re.compile(r'new\s+requests\s+will\s+be\s+granted\s+at\s*(\d{1,2}:\d{2})', re.IGNORECASE)
 COUNTDOWN_RE = re.compile(r'\b(\d{2}:\d{2})\b')
 ProgressCb = Optional[Callable[[str], Awaitable[None]]]
+LIMIT_RE = re.compile(r'(?:daily\s+limit\s+reached|limit\s+reached|лимит|rate\s*limit)', re.IGNORECASE)
 
 
 @dataclass
@@ -37,50 +37,56 @@ class ResolverClient:
         await self.client.disconnect()
 
     async def fetch_info(self, target: str, mode: str = 'all', progress_cb: ProgressCb = None) -> RawBotResponses:
+        profile = UserProfile(phone=self._phone_cache.get(target))
+
         if mode == 'bot_a':
             text_a, wait_a, retry_after, sec_a = await self._query_botfind(target, progress_cb=progress_cb)
+            self._merge_profile(profile, 'bot_a', text_a)
             return RawBotResponses(
                 botfindinformation=text_a,
                 bot_a_wait_until=wait_a,
                 bot_a_retry_after=retry_after,
                 bot_a_seconds=sec_a,
-                bot_a_phone=self._phone_cache.get(target),
+                bot_a_phone=profile.phone,
+                profile=profile,
             )
 
         if mode == 'bot_b':
             text_b, sec_b = await self._query_wow(target, progress_cb=progress_cb)
-            return RawBotResponses(wow_myai=text_b, bot_b_seconds=sec_b, bot_a_phone=self._phone_cache.get(target))
+            self._merge_profile(profile, 'bot_b', text_b)
+            return RawBotResponses(wow_myai=text_b, bot_b_seconds=sec_b, bot_a_phone=profile.phone, profile=profile)
 
-        task_a = asyncio.create_task(self._query_botfind(target, progress_cb=progress_cb))
-        task_b = asyncio.create_task(self._query_wow(target, progress_cb=progress_cb))
+        bot_jobs = {
+            'bot_a': asyncio.create_task(self._query_botfind(target, progress_cb=progress_cb)),
+            'bot_b': asyncio.create_task(self._query_wow(target, progress_cb=progress_cb)),
+        }
 
         text_a, wait_a, retry_after, sec_a = ('Timeout su Bot A.', None, None, None)
         text_b, sec_b = ('Timeout su Bot B.', None)
 
-        pending = {task_a, task_b}
-        while pending:
-            done, pending = await asyncio.wait(pending, timeout=MAX_BOT_WAIT_S, return_when=asyncio.FIRST_COMPLETED)
-            if not done:
-                break
-            for completed in done:
-                try:
-                    result = completed.result()
-                except Exception:
-                    if completed is task_a:
-                        text_a, wait_a, retry_after, sec_a = ('Timeout su Bot A.', None, None, MAX_BOT_WAIT_S)
-                    continue
+        done, pending = await asyncio.wait(set(bot_jobs.values()), timeout=MAX_BOT_WAIT_S)
+        for task in done:
+            bot_name = 'bot_a' if task is bot_jobs['bot_a'] else 'bot_b'
+            try:
+                result = task.result()
+            except Exception:
+                if bot_name == 'bot_a':
+                    result = ('Timeout su Bot A.', None, None, MAX_BOT_WAIT_S)
+                else:
+                    result = ('Timeout su Bot B.', MAX_BOT_WAIT_S)
 
-                if completed is task_a:
-                    text_a, wait_a, retry_after, sec_a = result
-                elif completed is task_b:
-                    text_b, sec_b = result
+            if bot_name == 'bot_a':
+                text_a, wait_a, retry_after, sec_a = result
+                self._merge_profile(profile, bot_name, text_a)
+            else:
+                text_b, sec_b = result
+                self._merge_profile(profile, bot_name, text_b)
 
-            if task_a.done() and task_b.done():
-                break
+        for task in pending:
+            task.cancel()
 
-        for task in (task_a, task_b):
-            if not task.done():
-                task.cancel()
+        if profile.phone:
+            self._phone_cache[target] = profile.phone
 
         return RawBotResponses(
             botfindinformation=text_a,
@@ -89,7 +95,8 @@ class ResolverClient:
             bot_a_retry_after=retry_after,
             bot_a_seconds=sec_a,
             bot_b_seconds=sec_b,
-            bot_a_phone=self._phone_cache.get(target),
+            bot_a_phone=profile.phone,
+            profile=profile,
         )
 
     async def _listen_first_text(self, chat_id: int, timeout: int, predicate: Optional[Callable[[str], bool]] = None) -> Tuple[str, float]:
@@ -117,13 +124,11 @@ class ResolverClient:
         try:
             async with self.client.conversation(BOT_A, timeout=MAX_BOT_WAIT_S) as conv:
                 await conv.send_message(target)
-
                 menu_msg = await conv.get_response()
                 menu_text = (menu_msg.raw_text or '').lower()
                 has_direction = ('choose direction' in menu_text) or ('направлен' in menu_text)
-                has_buttons = bool(menu_msg.buttons)
 
-                if has_buttons and has_direction:
+                if has_direction and menu_msg.buttons:
                     clicked = False
                     for row in menu_msg.buttons:
                         for button in row:
@@ -135,11 +140,10 @@ class ResolverClient:
                                 break
                         if clicked:
                             break
-                    if not clicked and menu_msg.buttons:
+                    if not clicked:
                         await menu_msg.click(0)
                         if progress_cb:
                             await progress_cb('bot_a_clicked')
-
                     result_msg: Message = await conv.get_response()
                     result_text = result_msg.raw_text or ''
                 else:
@@ -149,9 +153,10 @@ class ResolverClient:
                 wait_until = self._extract_wait_time(result_text)
                 retry_after = self._extract_countdown(result_text)
                 parsed = self._apply_regex_enrichment('a', result_text)
-                cached_phone = self._extract_phone(parsed)
-                if cached_phone:
-                    self._phone_cache[target] = cached_phone
+
+                phone = self._extract_phone(parsed)
+                if phone:
+                    self._phone_cache[target] = phone
 
                 if progress_cb:
                     await progress_cb('bot_a')
@@ -173,7 +178,7 @@ class ResolverClient:
         try:
             entity = await self.client.get_entity(BOT_B)
             await self.client.send_message(entity, target)
-            text, sec_b = await self._listen_first_text(entity.id, MAX_BOT_WAIT_S, predicate=self._is_final_bot_b_message)
+            text, sec_b = await self._listen_first_text(entity.id, MAX_BOT_WAIT_S, predicate=self._is_terminal_bot_b_message)
             parsed = self._apply_regex_enrichment('b', text)
             if progress_cb:
                 await progress_cb('bot_b')
@@ -188,11 +193,11 @@ class ResolverClient:
             return f'Errore Bot B: {exc}', max(0.001, time.perf_counter() - started)
 
     @staticmethod
-    def _is_final_bot_b_message(text: str) -> bool:
+    def _is_terminal_bot_b_message(text: str) -> bool:
         lowered = (text or '').lower()
         if '%' in text or 'searching' in lowered:
             return False
-        return 'search by telegram id' in lowered
+        return ('search by telegram id' in lowered) or bool(LIMIT_RE.search(lowered))
 
     @staticmethod
     def _extract_wait_time(text: str) -> Optional[str]:
@@ -217,7 +222,6 @@ class ResolverClient:
     @staticmethod
     def _apply_regex_enrichment(source: str, text: str) -> str:
         payload = text or ''
-
         if source == 'a':
             found_id = re.search(r'(?im)\bID\s*:\s*(\d+)', payload)
             found_phone = re.search(r'(?is)(?:Телефон\s*:|📞\s*)(\d{10,})', payload)
@@ -238,3 +242,46 @@ class ResolverClient:
             parts.append('Registered')
             parts.append(reg_text)
         return ('\n'.join(parts) + '\n' + payload) if parts else payload
+
+    @staticmethod
+    def _merge_profile(profile: UserProfile, bot_name: str, text: str) -> None:
+        payload = text or ''
+        if not payload:
+            return
+
+        id_match = re.search(r'(?im)\bID\s*:\s*(\d+)', payload)
+        if not id_match:
+            id_match = re.search(r'(?im)^\s*Search\s+by\s+Telegram\s+ID\s+.*?(\d+)\s*$', payload)
+        if id_match and not profile.identifier:
+            profile.identifier = id_match.group(1)
+
+        phone_match = re.search(r'(?im)^.*(?:Телефон\s*:|📞)\s*[^\n\r]*(\d{10,13})', payload)
+        if phone_match and not profile.phone:
+            profile.phone = phone_match.group(1)
+
+        reg_match = re.search(r'(?is)\bRegistered\b\s*:?\s*(.*?)(?:\n\s*🤖\s*Bots\b|$)', payload)
+        if reg_match and not profile.registration:
+            lines = [ln.strip() for ln in re.split(r'\r?\n', reg_match.group(1)) if ln.strip()]
+            clean_dates = [ln for ln in lines if 'search by telegram id' not in ln.lower() and not re.fullmatch(r'\d{7,10}', re.sub(r'\D', '', ln))]
+            if clean_dates:
+                profile.registration = ', '.join(clean_dates)
+
+        if bot_name == 'bot_a':
+            groups = re.findall(r'@[A-Za-z0-9_]{3,}', payload)
+            for group in groups:
+                if group not in profile.groups:
+                    profile.groups.append(group)
+            hist_block = re.search(r'(?is)История\s+изменения\s+имени\s*:\s*(.*?)\s*👥\s*Группы\s*:', payload)
+            if hist_block:
+                for ln in re.split(r'\r?\n', hist_block.group(1)):
+                    val = ln.strip('•- \t>')
+                    if val and val not in profile.history:
+                        profile.history.append(val)
+
+        if bot_name == 'bot_b':
+            bots_block = re.search(r'(?is)🤖\s*Bots\s*(.*)$', payload)
+            if bots_block:
+                for ln in re.split(r'\r?\n', bots_block.group(1)):
+                    val = ln.strip('•- \t>')
+                    if ':' in val and val not in profile.bot_data:
+                        profile.bot_data.append(val)

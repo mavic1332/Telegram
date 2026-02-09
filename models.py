@@ -1,5 +1,15 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional
+
+
+@dataclass
+class UserProfile:
+    identifier: Optional[str] = None
+    phone: Optional[str] = None
+    registration: Optional[str] = None
+    history: List[str] = field(default_factory=list)
+    groups: List[str] = field(default_factory=list)
+    bot_data: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -11,6 +21,7 @@ class RawBotResponses:
     bot_a_seconds: Optional[float] = None
     bot_b_seconds: Optional[float] = None
     bot_a_phone: Optional[str] = None
+    profile: UserProfile = field(default_factory=UserProfile)
 
     def as_dict(self) -> Dict[str, str]:
         return {
