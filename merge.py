@@ -51,7 +51,10 @@ def _clean_visible(text: str) -> str:
 
 def _extract_bot_b_id(text: str) -> Optional[str]:
     match = re.search(r'(?im)^\s*Search\s+by\s+Telegram\s+ID\s+.*?(\d+)\s*$', text)
-    return match.group(1) if match else None
+    if not match:
+        return None
+    digits = re.sub(r'\D', '', match.group(1))
+    return digits if digits else None
 
 
 def _extract_bot_b_registered(text: str) -> Optional[str]:
@@ -66,13 +69,19 @@ def _extract_bot_b_registered(text: str) -> Optional[str]:
 
 
 def _extract_bot_a_phone(text: str) -> Optional[str]:
-    match = re.search(r'(?is)(?:Телефон\s*:|📞\s*)(\d{10,})', text)
-    return match.group(1) if match else None
+    match = re.search(r'(?is)(?:Телефон:|📞)\s*([\d,\s]+)', text)
+    if not match:
+        return None
+    digits = re.sub(r'\D', '', match.group(1))
+    return digits if digits else None
 
 
 def _extract_bot_a_id(text: str) -> Optional[str]:
     match = re.search(r'(?im)\bID\s*:\s*(\d+)', text)
-    return match.group(1) if match else None
+    if not match:
+        return None
+    digits = re.sub(r'\D', '', match.group(1))
+    return digits if digits else None
 
 
 def _extract_bot_a_history(text: str) -> list[str]:

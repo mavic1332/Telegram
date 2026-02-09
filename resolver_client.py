@@ -82,15 +82,18 @@ class ResolverClient:
             bot_b_seconds=sec_b,
         )
 
-    async def _listen_first_text(self, chat_id: int, timeout: int) -> Tuple[str, float]:
+    async def _listen_first_text(self, chat_id: int, timeout: int, predicate: Optional[Callable[[str], bool]] = None) -> Tuple[str, float]:
         loop = asyncio.get_running_loop()
         start = time.perf_counter()
         done_future: asyncio.Future[Tuple[str, float]] = loop.create_future()
 
         async def on_new_message(event: events.NewMessage.Event) -> None:
             text = (event.raw_text or '').strip()
-            if text and not done_future.done():
-                done_future.set_result((text, max(0.001, time.perf_counter() - start)))
+            if not text or done_future.done():
+                return
+            if predicate and not predicate(text):
+                return
+            done_future.set_result((text, max(0.001, time.perf_counter() - start)))
 
         event_filter = events.NewMessage(chats=[chat_id])
         self.client.add_event_handler(on_new_message, event_filter)
@@ -144,20 +147,12 @@ class ResolverClient:
                     return '', wait_until, retry_after, sec_a
                 return parsed, None, None, sec_a
         except asyncio.TimeoutError:
-            if progress_cb:
-                await progress_cb('bot_a')
             return 'Timeout su Bot A.', None, None, max(0.001, time.perf_counter() - started)
         except (UserIsBlockedError, ChatWriteForbiddenError):
-            if progress_cb:
-                await progress_cb('bot_a')
             return 'Bot A bloccato o non scrivibile.', None, None, max(0.001, time.perf_counter() - started)
         except FloodWaitError as exc:
-            if progress_cb:
-                await progress_cb('bot_a')
             return f'Flood wait Bot A: {exc.seconds}s.', None, None, max(0.001, time.perf_counter() - started)
         except Exception as exc:  # noqa: BLE001
-            if progress_cb:
-                await progress_cb('bot_a')
             return f'Errore Bot A: {exc}', None, None, max(0.001, time.perf_counter() - started)
 
     async def _query_wow(self, target: str, progress_cb: ProgressCb = None) -> Tuple[str, float]:
@@ -165,27 +160,26 @@ class ResolverClient:
         try:
             entity = await self.client.get_entity(BOT_B)
             await self.client.send_message(entity, target)
-            text, sec_b = await self._listen_first_text(entity.id, MAX_BOT_WAIT_S)
+            text, sec_b = await self._listen_first_text(entity.id, MAX_BOT_WAIT_S, predicate=self._is_final_bot_b_message)
             parsed = self._apply_regex_enrichment('b', text)
             if progress_cb:
                 await progress_cb('bot_b')
             return parsed, sec_b
         except asyncio.TimeoutError:
-            if progress_cb:
-                await progress_cb('bot_b')
             return 'Timeout su Bot B.', max(0.001, time.perf_counter() - started)
         except (UserIsBlockedError, ChatWriteForbiddenError):
-            if progress_cb:
-                await progress_cb('bot_b')
             return 'Bot B bloccato o non scrivibile.', max(0.001, time.perf_counter() - started)
         except FloodWaitError as exc:
-            if progress_cb:
-                await progress_cb('bot_b')
             return f'Flood wait Bot B: {exc.seconds}s.', max(0.001, time.perf_counter() - started)
         except Exception as exc:  # noqa: BLE001
-            if progress_cb:
-                await progress_cb('bot_b')
             return f'Errore Bot B: {exc}', max(0.001, time.perf_counter() - started)
+
+    @staticmethod
+    def _is_final_bot_b_message(text: str) -> bool:
+        lowered = (text or '').lower()
+        if '%' in text or 'searching' in lowered:
+            return False
+        return 'search by telegram id' in lowered
 
     @staticmethod
     def _extract_wait_time(text: str) -> Optional[str]:
