@@ -15,6 +15,7 @@ class Settings:
     admin_id: int
     userbot_phones: List[str]
     userbot_sessions: List[str]
+    target_bot_b: str
 
 
 def _ensure_env_file() -> None:
@@ -29,6 +30,7 @@ def _ensure_env_file() -> None:
         'BOT_TOKEN=\n'
         'USERBOT_PHONES=\n'
         'USERBOT_SESSIONS=sessions/acc1,sessions/acc2,sessions/acc3,sessions/acc4\n'
+        'TARGET_BOT_B=@peoepeoeAIbot\n'
         'ADMIN_ID=\n',
         encoding='utf-8',
     )
@@ -141,6 +143,15 @@ def load_settings() -> Settings:
     effective_api_hashes_raw = _split_csv(api_hashes_raw) or ([api_hash_single] if api_hash_single else [])
     api_ids, api_hashes = _normalize_api_lists(effective_api_ids_raw, effective_api_hashes_raw, len(userbot_phones))
 
+
+    target_bot_b = _prompt_for_key(
+        values,
+        'TARGET_BOT_B',
+        'Inserisci TARGET_BOT_B (es: @peoepeoeAIbot)',
+        required=False,
+    ) or '@peoepeoeAIbot'
+    set_key(str(ENV_PATH), 'TARGET_BOT_B', target_bot_b)
+
     # persist normalized multi-account keys
     set_key(str(ENV_PATH), 'API_IDS', ','.join(str(x) for x in api_ids))
     set_key(str(ENV_PATH), 'API_HASHES', ','.join(api_hashes))
@@ -152,4 +163,5 @@ def load_settings() -> Settings:
         admin_id=int(admin_id) if admin_id.isdigit() else 0,
         userbot_phones=userbot_phones,
         userbot_sessions=userbot_sessions,
+        target_bot_b=target_bot_b,
     )

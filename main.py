@@ -16,6 +16,7 @@ async def main() -> None:
         api_hashes=settings.api_hashes,
         phones=settings.userbot_phones,
         session_names=settings.userbot_sessions,
+        target_bot_b=settings.target_bot_b,
     )
     db = SilentDatabase()
 

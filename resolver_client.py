@@ -14,7 +14,6 @@ from telethon.tl.custom.message import Message
 from models import RawBotResponses, UserProfile
 
 BOT_A = '@Botfindinformation_bot'
-BOT_B = '@WOW_MYAI_BOT'
 MAX_BOT_WAIT_S = 60
 PRIORITY_DELIVERY_S = 15
 LIMIT_HOURS = 12
@@ -38,6 +37,7 @@ class ResolverClient:
     api_hashes: list[str]
     phones: list[str]
     session_names: list[str]
+    target_bot_b: str = "@peoepeoeAIbot"
 
     def __post_init__(self) -> None:
         if not self.phones:
@@ -71,6 +71,11 @@ class ResolverClient:
         for idx, (client, phone) in enumerate(zip(self._clients, self.phones), start=1):
             await client.start(phone=phone)
             logging.info('[STATUS] Account %d initialized (%s).', idx, self.session_names[idx - 1])
+            try:
+                await client.send_message(self.target_bot_b, '/start')
+                logging.info('[STATUS] Account %d startup check OK -> %s', idx, self.target_bot_b)
+            except Exception as exc:  # noqa: BLE001
+                logging.warning('[STATUS] Account %d startup check FAILED -> %s (%s)', idx, self.target_bot_b, exc)
 
             async def on_new_message(event: events.NewMessage.Event, account_idx: int = idx) -> None:
                 pending = self._bot_b_pending.get(account_idx)
@@ -86,7 +91,7 @@ class ResolverClient:
                     return
                 if predicate and not predicate(text):
                     return
-                logging.info('[LISTENER] Capturing response for @UniversalSearch on Account %d...', account_idx)
+                logging.info('[LISTENER] Capturing response for %s on Account %d...', self.target_bot_b, account_idx)
                 parsed = self._apply_regex_enrichment('b', text)
                 if profile_updater:
                     profile_updater('bot_b', parsed, account_idx)
@@ -264,11 +269,11 @@ class ResolverClient:
     ) -> Tuple[str, float]:
         started = time.perf_counter()
         try:
-            entity = await client.get_entity(BOT_B)
+            entity = await client.get_entity(self.target_bot_b)
             loop = asyncio.get_running_loop()
             done_future: asyncio.Future[Tuple[str, float]] = loop.create_future()
             self._bot_b_pending[account_idx] = (done_future, self._is_terminal_bot_b_message, time.perf_counter(), entity.id, profile_updater)
-            logging.info('[LISTENER] Armed global listener for Account %d (chat=%s).', account_idx, entity.id)
+            logging.info('[LISTENER] Armed global listener for Account %d -> %s (chat=%s).', account_idx, self.target_bot_b, entity.id)
             await client.send_message(entity, target)
             try:
                 text, sec_b = await asyncio.wait_for(done_future, timeout=MAX_BOT_WAIT_S)
