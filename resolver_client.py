@@ -25,7 +25,9 @@ WAIT_UNTIL_RE = re.compile(r'new\s+requests\s+will\s+be\s+granted\s+at\s*(\d{1,2
 COUNTDOWN_RE = re.compile(r'\b(\d{2}:\d{2})\b')
 ProgressCb = Optional[Callable[[str], Awaitable[None]]]
 LIMIT_RE = re.compile(
-    r'(?:daily\s+limit\s+reached|limit\s+reached|лимит|rate\s*limit|wait\s*\d+\s*[hm]|attendi\s*\d+\s*[hm])',
+    r'(?:you\s+have\s+reached\s+the\s+daily\s+limit|daily\s+limit\s+reached|no\s+credits|limit\s+reached|'
+    r'ваш\s+лимит\s+запросов\s+временно\s+исчерпан|чтобы\s+продолжить\s+поиск,?\s*вы\s+можете\s+купить|'
+    r'лимит|rate\s*limit|wait\s*\d+\s*[hm]|attendi\s*\d+\s*[hm])',
     re.IGNORECASE,
 )
 ProfileUpdater = Optional[Callable[[str, str, int], None]]
@@ -95,6 +97,9 @@ class ResolverClient:
                 logging.info('[LISTENER] Capturing response for %s on Account %d...', self.target_bot_b, account_idx)
                 self._listener_busy += 1
                 try:
+                    if self._is_limit_message(text):
+                        future.set_result((text, max(0.01, time.perf_counter() - started_at)))
+                        return
                     parsed = self._apply_regex_enrichment('b', text)
                     if profile_updater:
                         profile_updater('bot_b', parsed, account_idx)
@@ -258,6 +263,7 @@ class ResolverClient:
             text, sec = await self._query_wow_with_client(client, idx + 1, target, progress_cb=progress_cb, profile_updater=profile_updater)
             if self._is_bot_b_error(text):
                 self._limited_until[idx] = datetime.utcnow() + timedelta(hours=LIMIT_HOURS)
+                logging.info('[ROTATION] Account %d marked LIMIT_REACHED, forcing switch.', idx + 1)
                 if pos < len(available):
                     next_idx = available[pos]
                     logging.info('[ROTATION] Account %d limited, switching to Account %d...', idx + 1, next_idx + 1)
@@ -304,6 +310,10 @@ class ResolverClient:
     @staticmethod
     def _has_core_profile(profile: UserProfile) -> bool:
         return bool(profile.identifier and profile.phone)
+
+    @staticmethod
+    def _is_limit_message(text: str) -> bool:
+        return bool(LIMIT_RE.search(text or ''))
 
     @staticmethod
     def _is_bot_b_error(text: str) -> bool:
