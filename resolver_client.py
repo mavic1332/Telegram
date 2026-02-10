@@ -128,6 +128,7 @@ class ResolverClient:
         bot_b_terminal = False
         self._last_rotation_at = None
         self._active_bot_b_started = started
+        priority_deadline = started + PRIORITY_DELIVERY_S
         deadline = started + MAX_BOT_WAIT_S
         seen_rotation_at: Optional[float] = None
 
@@ -143,8 +144,13 @@ class ResolverClient:
 
             if self._last_rotation_at and self._last_rotation_at != seen_rotation_at:
                 seen_rotation_at = self._last_rotation_at
+                priority_deadline = seen_rotation_at + PRIORITY_DELIVERY_S
                 deadline = max(deadline, seen_rotation_at + ROTATION_EXTENSION_S)
+                logging.info('[ROTATION] Timer reset: nuova finestra prioritaria %ss per account attivo.', PRIORITY_DELIVERY_S)
                 logging.info('[ROTATION] Timeout esteso: deadline aggiornata (+%ss per account attivo).', ROTATION_EXTENSION_S)
+
+            if self._active_bot_b_started and self._active_bot_b_started > started and self._active_bot_b_started + PRIORITY_DELIVERY_S > priority_deadline:
+                priority_deadline = self._active_bot_b_started + PRIORITY_DELIVERY_S
 
             if self._has_core_profile(profile) and not task_a.done():
                 task_a.cancel()
@@ -168,12 +174,8 @@ class ResolverClient:
 
             now_ts = time.perf_counter()
             rotation_grace = self._last_rotation_at is not None and (now_ts - self._last_rotation_at) < ROTATION_GRACE_S
-            active_attempt_elapsed = now_ts - (self._active_bot_b_started or started)
-            if self._has_core_profile(profile) and not task_b.done() and not bot_b_terminal and not rotation_grace and active_attempt_elapsed >= PRIORITY_DELIVERY_S:
-                text_b = 'Timeout/limite Bot B: consegna prioritaria con dati Bot A.'
-                sec_b = max(0.01, elapsed)
-                bot_b_terminal = True
-                task_b.cancel()
+            if self._has_core_profile(profile) and not task_b.done() and not bot_b_terminal and not rotation_grace and now_ts >= priority_deadline:
+                logging.info('[WAITING] Finestra prioritaria scaduta: continuo ad attendere esito account Bot B attivo.')
 
             if task_a.done() and (task_b.done() or bot_b_terminal):
                 break
@@ -230,6 +232,7 @@ class ResolverClient:
         for pos, idx in enumerate(available, start=1):
             client = self._clients[idx]
             self._active_bot_b_started = time.perf_counter()
+            logging.info('[STATUS] Account %d attivo per Bot B: finestra ascolto %ss.', idx + 1, PRIORITY_DELIVERY_S)
             text, sec = await self._query_wow_with_client(client, idx + 1, target, progress_cb=progress_cb, profile_updater=profile_updater)
             if self._is_bot_b_error(text):
                 self._limited_until[idx] = datetime.utcnow() + timedelta(hours=LIMIT_HOURS)
@@ -287,35 +290,6 @@ class ResolverClient:
     def _is_bot_b_error(text: str) -> bool:
         lowered = (text or '').lower()
         return bool(LIMIT_RE.search(lowered) or 'timeout su bot b' in lowered or 'errore bot b' in lowered)
-
-    async def _listen_first_text(
-        self,
-        client: TelegramClient,
-        account_idx: int,
-        chat_id: int,
-        timeout: int,
-        predicate: Optional[Callable[[str], bool]] = None,
-    ) -> Tuple[str, float]:
-        loop = asyncio.get_running_loop()
-        start = time.perf_counter()
-        done_future: asyncio.Future[Tuple[str, float]] = loop.create_future()
-
-        async def on_new_message(event: events.NewMessage.Event) -> None:
-            text = (event.raw_text or '').strip()
-            if not text or done_future.done():
-                return
-            if predicate and not predicate(text):
-                return
-            done_future.set_result((text, max(0.01, time.perf_counter() - start)))
-
-        event_filter = events.NewMessage(chats=[chat_id])
-        logging.info('[LISTENER] Attach Bot B listener on Account %d (chat=%s).', account_idx, chat_id)
-        client.add_event_handler(on_new_message, event_filter)
-        try:
-            return await asyncio.wait_for(done_future, timeout=timeout)
-        finally:
-            client.remove_event_handler(on_new_message, event_filter)
-            logging.info('[LISTENER] Detach Bot B listener on Account %d.', account_idx)
 
     async def _query_botfind(
         self,
