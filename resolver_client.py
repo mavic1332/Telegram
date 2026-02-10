@@ -18,6 +18,8 @@ BOT_B = '@WOW_MYAI_BOT'
 MAX_BOT_WAIT_S = 30
 PRIORITY_DELIVERY_S = 15
 LIMIT_HOURS = 12
+ROTATION_COOLDOWN_S = 2
+ROTATION_GRACE_S = 8
 WAIT_UNTIL_RE = re.compile(r'new\s+requests\s+will\s+be\s+granted\s+at\s*(\d{1,2}:\d{2})', re.IGNORECASE)
 COUNTDOWN_RE = re.compile(r'\b(\d{2}:\d{2})\b')
 ProgressCb = Optional[Callable[[str], Awaitable[None]]]
@@ -30,8 +32,8 @@ ProfileUpdater = Optional[Callable[[str, str], None]]
 
 @dataclass
 class ResolverClient:
-    api_id: int
-    api_hash: str
+    api_ids: list[int]
+    api_hashes: list[str]
     phones: list[str]
     session_names: list[str]
 
@@ -39,14 +41,26 @@ class ResolverClient:
         if not self.phones:
             raise ValueError('At least one phone is required for userbot clients.')
 
+        while len(self.session_names) < len(self.phones):
+            self.session_names.append(f'sessions/acc{len(self.session_names) + 1}')
+
+        while len(self.api_ids) < len(self.phones):
+            self.api_ids.append(self.api_ids[0])
+        while len(self.api_hashes) < len(self.phones):
+            self.api_hashes.append(self.api_hashes[0])
+
+        if len(set(self.api_ids)) == 1 and len(set(self.api_hashes)) == 1 and len(self.phones) > 1:
+            logging.warning('[WARN] Single API_ID/API_HASH reused across %d accounts; possible flood limitations.', len(self.phones))
+
         self._clients: list[TelegramClient] = []
-        for session in self.session_names:
+        for idx, session in enumerate(self.session_names[:len(self.phones)]):
             Path(session).parent.mkdir(parents=True, exist_ok=True)
-            self._clients.append(TelegramClient(session, self.api_id, self.api_hash))
+            self._clients.append(TelegramClient(session, self.api_ids[idx], self.api_hashes[idx]))
 
         self._primary_client = self._clients[0]
         self._phone_cache: dict[str, str] = {}
         self._limited_until: dict[int, datetime] = {}
+        self._last_rotation_at: Optional[float] = None
 
     async def start(self) -> None:
         for idx, (client, phone) in enumerate(zip(self._clients, self.phones), start=1):
@@ -85,6 +99,7 @@ class ResolverClient:
         text_a, wait_a, retry_after, sec_a = ('Timeout su Bot A.', None, None, None)
         text_b, sec_b = ('Timeout su Bot B.', None)
         bot_b_terminal = False
+        self._last_rotation_at = None
 
         while True:
             elapsed = time.perf_counter() - started
@@ -111,7 +126,8 @@ class ResolverClient:
                     if self._is_bot_b_error(text_b):
                         bot_b_terminal = True
 
-            if self._has_core_profile(profile) and not task_b.done() and not bot_b_terminal and elapsed >= PRIORITY_DELIVERY_S:
+            rotation_grace = self._last_rotation_at is not None and (time.perf_counter() - self._last_rotation_at) < ROTATION_GRACE_S
+            if self._has_core_profile(profile) and not task_b.done() and not bot_b_terminal and not rotation_grace and elapsed >= PRIORITY_DELIVERY_S:
                 text_b = 'Timeout/limite Bot B: consegna prioritaria con dati Bot A.'
                 sec_b = max(0.01, elapsed)
                 bot_b_terminal = True
@@ -177,7 +193,9 @@ class ResolverClient:
                 if pos < len(available):
                     next_idx = available[pos]
                     logging.info('[ROTATION] Account %d limited, switching to Account %d...', idx + 1, next_idx + 1)
+                    self._last_rotation_at = time.perf_counter()
                     logging.info('[STATUS] %d/%d accounts available.', len(self._available_rotation_indexes()), len(self._clients))
+                    await asyncio.sleep(ROTATION_COOLDOWN_S)
                 continue
             return text, sec
 

@@ -12,8 +12,8 @@ async def main() -> None:
     configure_logging()
     settings = load_settings()
     resolver = ResolverClient(
-        api_id=settings.api_id,
-        api_hash=settings.api_hash,
+        api_ids=settings.api_ids,
+        api_hashes=settings.api_hashes,
         phones=settings.userbot_phones,
         session_names=settings.userbot_sessions,
     )
