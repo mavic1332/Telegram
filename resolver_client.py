@@ -15,12 +15,13 @@ from models import RawBotResponses, UserProfile
 
 BOT_A = '@Botfindinformation_bot'
 BOT_B = '@WOW_MYAI_BOT'
-MAX_BOT_WAIT_S = 30
+MAX_BOT_WAIT_S = 60
 PRIORITY_DELIVERY_S = 15
 LIMIT_HOURS = 12
 ROTATION_COOLDOWN_S = 2
 ROTATION_GRACE_S = 8
 ROTATION_EXTENSION_S = 15
+WAITING_LOG_INTERVAL_S = 10
 WAIT_UNTIL_RE = re.compile(r'new\s+requests\s+will\s+be\s+granted\s+at\s*(\d{1,2}:\d{2})', re.IGNORECASE)
 COUNTDOWN_RE = re.compile(r'\b(\d{2}:\d{2})\b')
 ProgressCb = Optional[Callable[[str], Awaitable[None]]]
@@ -131,6 +132,7 @@ class ResolverClient:
         priority_deadline = started + PRIORITY_DELIVERY_S
         deadline = started + MAX_BOT_WAIT_S
         seen_rotation_at: Optional[float] = None
+        last_waiting_bucket = -1
 
         while True:
             elapsed = time.perf_counter() - started
@@ -140,7 +142,10 @@ class ResolverClient:
             if not task_b.done() and not bot_b_terminal:
                 pending_names.append('Bot B')
             if pending_names:
-                logging.info('[WAITING] for %s... (%.1fs elapsed)', ' and '.join(pending_names), elapsed)
+                waiting_bucket = int(elapsed // WAITING_LOG_INTERVAL_S)
+                if waiting_bucket > 0 and waiting_bucket != last_waiting_bucket:
+                    last_waiting_bucket = waiting_bucket
+                    logging.info('[WAITING] for %s... (%ds elapsed)', ' and '.join(pending_names), waiting_bucket * WAITING_LOG_INTERVAL_S)
 
             if self._last_rotation_at and self._last_rotation_at != seen_rotation_at:
                 seen_rotation_at = self._last_rotation_at
@@ -174,9 +179,6 @@ class ResolverClient:
 
             now_ts = time.perf_counter()
             rotation_grace = self._last_rotation_at is not None and (now_ts - self._last_rotation_at) < ROTATION_GRACE_S
-            if self._has_core_profile(profile) and not task_b.done() and not bot_b_terminal and not rotation_grace and now_ts >= priority_deadline:
-                logging.info('[WAITING] Finestra prioritaria scaduta: continuo ad attendere esito account Bot B attivo.')
-
             if task_a.done() and (task_b.done() or bot_b_terminal):
                 break
 
