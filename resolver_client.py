@@ -29,7 +29,7 @@ LIMIT_RE = re.compile(
     r'(?:daily\s+limit\s+reached|limit\s+reached|лимит|rate\s*limit|wait\s*\d+\s*[hm]|attendi\s*\d+\s*[hm])',
     re.IGNORECASE,
 )
-ProfileUpdater = Optional[Callable[[str, str], None]]
+ProfileUpdater = Optional[Callable[[str, str, int], None]]
 
 
 @dataclass
@@ -64,7 +64,7 @@ class ResolverClient:
         self._limited_until: dict[int, datetime] = {}
         self._last_rotation_at: Optional[float] = None
         self._active_bot_b_started: Optional[float] = None
-        self._bot_b_pending: dict[int, tuple[asyncio.Future[Tuple[str, float]], Optional[Callable[[str], bool]], float, int]] = {}
+        self._bot_b_pending: dict[int, tuple[asyncio.Future[Tuple[str, float]], Optional[Callable[[str], bool]], float, int, ProfileUpdater]] = {}
         self._bot_b_handlers: dict[int, Callable] = {}
 
     async def start(self) -> None:
@@ -76,7 +76,7 @@ class ResolverClient:
                 pending = self._bot_b_pending.get(account_idx)
                 if not pending:
                     return
-                future, predicate, started_at, bot_chat_id = pending
+                future, predicate, started_at, bot_chat_id, profile_updater = pending
                 if future.done():
                     return
                 text = (event.raw_text or '').strip()
@@ -87,7 +87,10 @@ class ResolverClient:
                 if predicate and not predicate(text):
                     return
                 logging.info('[LISTENER] Capturing response for @UniversalSearch on Account %d...', account_idx)
-                future.set_result((text, max(0.01, time.perf_counter() - started_at)))
+                parsed = self._apply_regex_enrichment('b', text)
+                if profile_updater:
+                    profile_updater('bot_b', parsed, account_idx)
+                future.set_result((parsed, max(0.01, time.perf_counter() - started_at)))
 
             self._bot_b_handlers[idx] = on_new_message
             client.add_event_handler(on_new_message, events.NewMessage())
@@ -102,8 +105,10 @@ class ResolverClient:
     async def fetch_info(self, target: str, mode: str = 'all', progress_cb: ProgressCb = None) -> RawBotResponses:
         profile = UserProfile(phone=self._phone_cache.get(target))
 
-        def update_profile(bot_name: str, payload: str) -> None:
-            self._merge_profile(profile, bot_name, payload)
+        def update_profile(bot_name: str, payload: str, account_idx: int) -> None:
+            updated_fields = self._merge_profile(profile, bot_name, payload)
+            if updated_fields:
+                logging.info('[DATA_SYNC] Fields updated by Account %d: %s', account_idx, ', '.join(updated_fields))
 
         if mode == 'bot_a':
             text_a, wait_a, retry_after, sec_a = await self._query_botfind(target, progress_cb=progress_cb, profile_updater=update_profile)
@@ -262,19 +267,16 @@ class ResolverClient:
             entity = await client.get_entity(BOT_B)
             loop = asyncio.get_running_loop()
             done_future: asyncio.Future[Tuple[str, float]] = loop.create_future()
-            self._bot_b_pending[account_idx] = (done_future, self._is_terminal_bot_b_message, time.perf_counter(), entity.id)
+            self._bot_b_pending[account_idx] = (done_future, self._is_terminal_bot_b_message, time.perf_counter(), entity.id, profile_updater)
             logging.info('[LISTENER] Armed global listener for Account %d (chat=%s).', account_idx, entity.id)
             await client.send_message(entity, target)
             try:
                 text, sec_b = await asyncio.wait_for(done_future, timeout=MAX_BOT_WAIT_S)
             finally:
                 self._bot_b_pending.pop(account_idx, None)
-            parsed = self._apply_regex_enrichment('b', text)
-            if profile_updater:
-                profile_updater('bot_b', parsed)
             if progress_cb:
                 await progress_cb('bot_b')
-            return parsed, sec_b
+            return text, sec_b
         except asyncio.TimeoutError:
             return 'Timeout su Bot B.', max(0.01, time.perf_counter() - started)
         except (UserIsBlockedError, ChatWriteForbiddenError):
@@ -334,7 +336,7 @@ class ResolverClient:
                 parsed = self._apply_regex_enrichment('a', result_text)
 
                 if profile_updater:
-                    profile_updater('bot_a', parsed)
+                    profile_updater('bot_a', parsed, 1)
 
                 phone = self._extract_phone(parsed)
                 if phone:
@@ -407,20 +409,23 @@ class ResolverClient:
         return ('\n'.join(parts) + '\n' + payload) if parts else payload
 
     @staticmethod
-    def _merge_profile(profile: UserProfile, bot_name: str, text: str) -> None:
+    def _merge_profile(profile: UserProfile, bot_name: str, text: str) -> list[str]:
         payload = text or ''
         if not payload:
-            return
+            return []
 
+        updated_fields: list[str] = []
         id_match = re.search(r'(?im)\bID\s*:\s*(\d+)', payload)
         if not id_match:
             id_match = re.search(r'(?im)^\s*Search\s+by\s+Telegram\s+ID\s+.*?(\d+)\s*$', payload)
         if id_match and not profile.identifier:
             profile.identifier = id_match.group(1)
+            updated_fields.append('ID')
 
         phone_match = re.search(r'(?im)^.*(?:Телефон\s*:|📞)\s*[^\n\r]*(\d{10,13})', payload)
         if phone_match and not profile.phone:
             profile.phone = phone_match.group(1)
+            updated_fields.append('Telefono')
 
         reg_match = re.search(r'(?is)\bRegistered\b\s*:?\s*(.*?)(?:\n\s*🤖\s*Bots\b|$)', payload)
         if reg_match and not profile.registration:
@@ -431,18 +436,23 @@ class ResolverClient:
             ]
             if clean_dates:
                 profile.registration = ', '.join(clean_dates)
+                updated_fields.append('Registrazione')
 
         if bot_name == 'bot_a':
             groups = re.findall(r'@[A-Za-z0-9_]{3,}', payload)
             for group in groups:
                 if group not in profile.groups:
                     profile.groups.append(group)
+                    if 'Gruppi' not in updated_fields:
+                        updated_fields.append('Gruppi')
             hist_block = re.search(r'(?is)История\s+изменения\s+имени\s*:\s*(.*?)\s*👥\s*Группы\s*:', payload)
             if hist_block:
                 for ln in re.split(r'\r?\n', hist_block.group(1)):
                     val = ln.strip('•- \t>')
                     if val and val not in profile.history:
                         profile.history.append(val)
+                        if 'Storico' not in updated_fields:
+                            updated_fields.append('Storico')
 
         if bot_name == 'bot_b':
             bots_block = re.search(r'(?is)🤖\s*Bots\s*(.*)$', payload)
@@ -451,3 +461,7 @@ class ResolverClient:
                     val = ln.strip('•- \t>')
                     if ':' in val and val not in profile.bot_data:
                         profile.bot_data.append(val)
+                        if 'Dati' not in updated_fields:
+                            updated_fields.append('Dati')
+
+        return updated_fields
