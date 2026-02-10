@@ -66,6 +66,7 @@ class ResolverClient:
         self._active_bot_b_started: Optional[float] = None
         self._bot_b_pending: dict[int, tuple[asyncio.Future[Tuple[str, float]], Optional[Callable[[str], bool]], float, int, ProfileUpdater]] = {}
         self._bot_b_handlers: dict[int, Callable] = {}
+        self._listener_busy = 0
 
     async def start(self) -> None:
         for idx, (client, phone) in enumerate(zip(self._clients, self.phones), start=1):
@@ -92,10 +93,14 @@ class ResolverClient:
                 if predicate and not predicate(text):
                     return
                 logging.info('[LISTENER] Capturing response for %s on Account %d...', self.target_bot_b, account_idx)
-                parsed = self._apply_regex_enrichment('b', text)
-                if profile_updater:
-                    profile_updater('bot_b', parsed, account_idx)
-                future.set_result((parsed, max(0.01, time.perf_counter() - started_at)))
+                self._listener_busy += 1
+                try:
+                    parsed = self._apply_regex_enrichment('b', text)
+                    if profile_updater:
+                        profile_updater('bot_b', parsed, account_idx)
+                    future.set_result((parsed, max(0.01, time.perf_counter() - started_at)))
+                finally:
+                    self._listener_busy = max(0, self._listener_busy - 1)
 
             self._bot_b_handlers[idx] = on_new_message
             client.add_event_handler(on_new_message, events.NewMessage())
@@ -117,6 +122,7 @@ class ResolverClient:
 
         if mode == 'bot_a':
             text_a, wait_a, retry_after, sec_a = await self._query_botfind(target, progress_cb=progress_cb, profile_updater=update_profile)
+            await self._wait_for_listener_sync()
             return RawBotResponses(
                 botfindinformation=text_a,
                 bot_a_wait_until=wait_a,
@@ -128,6 +134,7 @@ class ResolverClient:
 
         if mode == 'bot_b':
             text_b, sec_b = await self._query_wow_rotating(target, progress_cb=progress_cb, profile_updater=update_profile)
+            await self._wait_for_listener_sync()
             return RawBotResponses(wow_myai=text_b, bot_b_seconds=sec_b, bot_a_phone=profile.phone, profile=profile)
 
         started = time.perf_counter()
@@ -187,8 +194,6 @@ class ResolverClient:
                     if self._is_bot_b_error(text_b):
                         bot_b_terminal = True
 
-            now_ts = time.perf_counter()
-            rotation_grace = self._last_rotation_at is not None and (now_ts - self._last_rotation_at) < ROTATION_GRACE_S
             if task_a.done() and (task_b.done() or bot_b_terminal):
                 break
 
@@ -219,6 +224,11 @@ class ResolverClient:
             bot_a_phone=profile.phone,
             profile=profile,
         )
+
+    async def _wait_for_listener_sync(self, timeout_s: float = 3.0) -> None:
+        end = time.perf_counter() + timeout_s
+        while self._listener_busy > 0 and time.perf_counter() < end:
+            await asyncio.sleep(0.05)
 
     def _available_rotation_indexes(self) -> list[int]:
         now = datetime.utcnow()
