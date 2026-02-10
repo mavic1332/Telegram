@@ -31,6 +31,11 @@ def _username(user: Message | CallbackQuery) -> str:
     return f'@{u.username}' if u.username else f'id:{u.id}'
 
 
+def _user_id(user: Message | CallbackQuery) -> int:
+    u = user.from_user
+    return u.id if u else 0
+
+
 def _full_name(message: Message | CallbackQuery) -> str:
     u = message.from_user
     if not u:
@@ -79,7 +84,7 @@ async def _run_with_progress(
         await progress_cb('parsed')
     await message.answer('\n'.join(result.lines), reply_markup=_result_keyboard(target))
 
-    logging.info(f"[{ts_hms()}] [USER: {_username(message)}] searched for: [{target}]")
+    logging.info(f"[{ts_hms()}] [USER_ID: {_user_id(message)}] [{_username(message)}] searched for: [{target}]")
     if 'Riprova tra' in '\n'.join(result.lines):
         for line in result.lines:
             if 'Riprova tra' in line:

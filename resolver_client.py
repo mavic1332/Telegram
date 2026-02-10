@@ -25,8 +25,8 @@ WAIT_UNTIL_RE = re.compile(r'new\s+requests\s+will\s+be\s+granted\s+at\s*(\d{1,2
 COUNTDOWN_RE = re.compile(r'\b(\d{2}:\d{2})\b')
 ProgressCb = Optional[Callable[[str], Awaitable[None]]]
 LIMIT_RE = re.compile(
-    r'(?:you\s+have\s+reached\s+the\s+daily\s+limit|daily\s+limit\s+reached|no\s+credits|limit\s+reached|'
-    r'ваш\s+лимит\s+запросов\s+временно\s+исчерпан|чтобы\s+продолжить\s+поиск,?\s*вы\s+можете\s+купить|'
+    r'(?:reached\s+the\s+daily\s+limit|you\s+have\s+reached\s+the\s+daily\s+limit|no\s+credits|wait\s*6\s*h\.|limit\s+reached|'
+    r'лимит\s+запросов\s+исчерпан|ваш\s+лимит\s+запросов\s+временно\s+исчерпан|чтобы\s+продолжить\s+поиск,?\s*вы\s+можете\s+купить|'
     r'лимит|rate\s*limit|wait\s*\d+\s*[hm]|attendi\s*\d+\s*[hm])',
     re.IGNORECASE,
 )
@@ -75,10 +75,10 @@ class ResolverClient:
             await client.start(phone=phone)
             logging.info('[STATUS] Account %d initialized (%s).', idx, self.session_names[idx - 1])
             try:
-                await client.send_message(self.target_bot_b, '/start')
-                logging.info('[STATUS] Account %d startup check OK -> %s', idx, self.target_bot_b)
+                me = await client.get_me()
+                logging.info('[STATUS] Account %d connectivity OK (me=%s).', idx, getattr(me, 'id', 'n/a'))
             except Exception as exc:  # noqa: BLE001
-                logging.warning('[STATUS] Account %d startup check FAILED -> %s (%s)', idx, self.target_bot_b, exc)
+                logging.warning('[STATUS] Account %d connectivity check FAILED (%s)', idx, exc)
 
             async def on_new_message(event: events.NewMessage.Event, account_idx: int = idx) -> None:
                 pending = self._bot_b_pending.get(account_idx)
@@ -263,10 +263,10 @@ class ResolverClient:
             text, sec = await self._query_wow_with_client(client, idx + 1, target, progress_cb=progress_cb, profile_updater=profile_updater)
             if self._is_bot_b_error(text):
                 self._limited_until[idx] = datetime.utcnow() + timedelta(hours=LIMIT_HOURS)
-                logging.info('[ROTATION] Account %d marked LIMIT_REACHED, forcing switch.', idx + 1)
+                logging.info('[ROTATION] Account %d temporarily_limited.', idx + 1)
                 if pos < len(available):
                     next_idx = available[pos]
-                    logging.info('[ROTATION] Account %d limited, switching to Account %d...', idx + 1, next_idx + 1)
+                    logging.info('[ROTATION] Limit detected on Account %d, switching to Account %d...', idx + 1, next_idx + 1)
                     self._last_rotation_at = time.perf_counter()
                     logging.info('[STATUS] %d/%d accounts available.', len(self._available_rotation_indexes()), len(self._clients))
                     await asyncio.sleep(ROTATION_COOLDOWN_S)
