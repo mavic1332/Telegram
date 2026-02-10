@@ -14,7 +14,8 @@ async def main() -> None:
     resolver = ResolverClient(
         api_id=settings.api_id,
         api_hash=settings.api_hash,
-        phone=settings.phone,
+        phones=settings.userbot_phones,
+        session_names=settings.userbot_sessions,
     )
     db = SilentDatabase()
 

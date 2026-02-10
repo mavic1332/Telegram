@@ -3,6 +3,8 @@ import logging
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Awaitable, Callable, Optional, Tuple
 
 from telethon import TelegramClient, events
@@ -15,6 +17,7 @@ BOT_A = '@Botfindinformation_bot'
 BOT_B = '@WOW_MYAI_BOT'
 MAX_BOT_WAIT_S = 30
 PRIORITY_DELIVERY_S = 15
+LIMIT_HOURS = 12
 WAIT_UNTIL_RE = re.compile(r'new\s+requests\s+will\s+be\s+granted\s+at\s*(\d{1,2}:\d{2})', re.IGNORECASE)
 COUNTDOWN_RE = re.compile(r'\b(\d{2}:\d{2})\b')
 ProgressCb = Optional[Callable[[str], Awaitable[None]]]
@@ -22,24 +25,37 @@ LIMIT_RE = re.compile(
     r'(?:daily\s+limit\s+reached|limit\s+reached|лимит|rate\s*limit|wait\s*\d+\s*[hm]|attendi\s*\d+\s*[hm])',
     re.IGNORECASE,
 )
+ProfileUpdater = Optional[Callable[[str, str], None]]
 
 
 @dataclass
 class ResolverClient:
     api_id: int
     api_hash: str
-    phone: str
-    session_name: str = 'test1_resolver'
+    phones: list[str]
+    session_names: list[str]
 
     def __post_init__(self) -> None:
-        self.client = TelegramClient(self.session_name, self.api_id, self.api_hash)
+        if not self.phones:
+            raise ValueError('At least one phone is required for userbot clients.')
+
+        self._clients: list[TelegramClient] = []
+        for session in self.session_names:
+            Path(session).parent.mkdir(parents=True, exist_ok=True)
+            self._clients.append(TelegramClient(session, self.api_id, self.api_hash))
+
+        self._primary_client = self._clients[0]
         self._phone_cache: dict[str, str] = {}
+        self._limited_until: dict[int, datetime] = {}
 
     async def start(self) -> None:
-        await self.client.start(phone=self.phone)
+        for idx, (client, phone) in enumerate(zip(self._clients, self.phones), start=1):
+            await client.start(phone=phone)
+            logging.info('[STATUS] Account %d initialized (%s).', idx, self.session_names[idx - 1])
 
     async def stop(self) -> None:
-        await self.client.disconnect()
+        for client in self._clients:
+            await client.disconnect()
 
     async def fetch_info(self, target: str, mode: str = 'all', progress_cb: ProgressCb = None) -> RawBotResponses:
         profile = UserProfile(phone=self._phone_cache.get(target))
@@ -59,12 +75,12 @@ class ResolverClient:
             )
 
         if mode == 'bot_b':
-            text_b, sec_b = await self._query_wow(target, progress_cb=progress_cb, profile_updater=update_profile)
+            text_b, sec_b = await self._query_wow_rotating(target, progress_cb=progress_cb, profile_updater=update_profile)
             return RawBotResponses(wow_myai=text_b, bot_b_seconds=sec_b, bot_a_phone=profile.phone, profile=profile)
 
         started = time.perf_counter()
         task_a = asyncio.create_task(self._query_botfind(target, progress_cb=progress_cb, profile_updater=update_profile))
-        task_b = asyncio.create_task(self._query_wow(target, progress_cb=progress_cb, profile_updater=update_profile))
+        task_b = asyncio.create_task(self._query_wow_rotating(target, progress_cb=progress_cb, profile_updater=update_profile))
 
         text_a, wait_a, retry_after, sec_a = ('Timeout su Bot A.', None, None, None)
         text_b, sec_b = ('Timeout su Bot B.', None)
@@ -132,6 +148,68 @@ class ResolverClient:
             profile=profile,
         )
 
+    def _available_rotation_indexes(self) -> list[int]:
+        now = datetime.utcnow()
+        available: list[int] = []
+        for idx in range(len(self._clients)):
+            limited = self._limited_until.get(idx)
+            if not limited or limited <= now:
+                available.append(idx)
+        logging.info('[STATUS] %d/%d accounts available.', len(available), len(self._clients))
+        return available
+
+    async def _query_wow_rotating(
+        self,
+        target: str,
+        progress_cb: ProgressCb = None,
+        profile_updater: ProfileUpdater = None,
+    ) -> Tuple[str, float]:
+        started = time.perf_counter()
+        available = self._available_rotation_indexes()
+        if not available:
+            return 'Tutti gli account Bot B sono temporaneamente limitati.', max(0.01, time.perf_counter() - started)
+
+        for pos, idx in enumerate(available, start=1):
+            client = self._clients[idx]
+            text, sec = await self._query_wow_with_client(client, target, progress_cb=progress_cb, profile_updater=profile_updater)
+            if self._is_bot_b_error(text):
+                self._limited_until[idx] = datetime.utcnow() + timedelta(hours=LIMIT_HOURS)
+                if pos < len(available):
+                    next_idx = available[pos]
+                    logging.info('[ROTATION] Account %d limited, switching to Account %d...', idx + 1, next_idx + 1)
+                    logging.info('[STATUS] %d/%d accounts available.', len(self._available_rotation_indexes()), len(self._clients))
+                continue
+            return text, sec
+
+        return 'Limite raggiunto su tutti gli account Bot B disponibili.', max(0.01, time.perf_counter() - started)
+
+    async def _query_wow_with_client(
+        self,
+        client: TelegramClient,
+        target: str,
+        progress_cb: ProgressCb = None,
+        profile_updater: ProfileUpdater = None,
+    ) -> Tuple[str, float]:
+        started = time.perf_counter()
+        try:
+            entity = await client.get_entity(BOT_B)
+            await client.send_message(entity, target)
+            text, sec_b = await self._listen_first_text(client, entity.id, MAX_BOT_WAIT_S, predicate=self._is_terminal_bot_b_message)
+            parsed = self._apply_regex_enrichment('b', text)
+            if profile_updater:
+                profile_updater('bot_b', parsed)
+            if progress_cb:
+                await progress_cb('bot_b')
+            return parsed, sec_b
+        except asyncio.TimeoutError:
+            return 'Timeout su Bot B.', max(0.01, time.perf_counter() - started)
+        except (UserIsBlockedError, ChatWriteForbiddenError):
+            return 'Bot B bloccato o non scrivibile.', max(0.01, time.perf_counter() - started)
+        except FloodWaitError as exc:
+            return f'Flood wait Bot B: {exc.seconds}s.', max(0.01, time.perf_counter() - started)
+        except Exception as exc:  # noqa: BLE001
+            return f'Errore Bot B: {exc}', max(0.01, time.perf_counter() - started)
+
     @staticmethod
     def _has_core_profile(profile: UserProfile) -> bool:
         return bool(profile.identifier and profile.phone)
@@ -141,7 +219,13 @@ class ResolverClient:
         lowered = (text or '').lower()
         return bool(LIMIT_RE.search(lowered) or 'timeout su bot b' in lowered or 'errore bot b' in lowered)
 
-    async def _listen_first_text(self, chat_id: int, timeout: int, predicate: Optional[Callable[[str], bool]] = None) -> Tuple[str, float]:
+    async def _listen_first_text(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        timeout: int,
+        predicate: Optional[Callable[[str], bool]] = None,
+    ) -> Tuple[str, float]:
         loop = asyncio.get_running_loop()
         start = time.perf_counter()
         done_future: asyncio.Future[Tuple[str, float]] = loop.create_future()
@@ -155,21 +239,21 @@ class ResolverClient:
             done_future.set_result((text, max(0.01, time.perf_counter() - start)))
 
         event_filter = events.NewMessage(chats=[chat_id])
-        self.client.add_event_handler(on_new_message, event_filter)
+        client.add_event_handler(on_new_message, event_filter)
         try:
             return await asyncio.wait_for(done_future, timeout=timeout)
         finally:
-            self.client.remove_event_handler(on_new_message, event_filter)
+            client.remove_event_handler(on_new_message, event_filter)
 
     async def _query_botfind(
         self,
         target: str,
         progress_cb: ProgressCb = None,
-        profile_updater: Optional[Callable[[str, str], None]] = None,
+        profile_updater: ProfileUpdater = None,
     ) -> Tuple[str, Optional[str], Optional[str], float]:
         started = time.perf_counter()
         try:
-            async with self.client.conversation(BOT_A, timeout=MAX_BOT_WAIT_S) as conv:
+            async with self._primary_client.conversation(BOT_A, timeout=MAX_BOT_WAIT_S) as conv:
                 await conv.send_message(target)
                 menu_msg = await conv.get_response()
                 menu_text = (menu_msg.raw_text or '').lower()
@@ -222,32 +306,6 @@ class ResolverClient:
             return f'Flood wait Bot A: {exc.seconds}s.', None, None, max(0.01, time.perf_counter() - started)
         except Exception as exc:  # noqa: BLE001
             return f'Errore Bot A: {exc}', None, None, max(0.01, time.perf_counter() - started)
-
-    async def _query_wow(
-        self,
-        target: str,
-        progress_cb: ProgressCb = None,
-        profile_updater: Optional[Callable[[str, str], None]] = None,
-    ) -> Tuple[str, float]:
-        started = time.perf_counter()
-        try:
-            entity = await self.client.get_entity(BOT_B)
-            await self.client.send_message(entity, target)
-            text, sec_b = await self._listen_first_text(entity.id, MAX_BOT_WAIT_S, predicate=self._is_terminal_bot_b_message)
-            parsed = self._apply_regex_enrichment('b', text)
-            if profile_updater:
-                profile_updater('bot_b', parsed)
-            if progress_cb:
-                await progress_cb('bot_b')
-            return parsed, sec_b
-        except asyncio.TimeoutError:
-            return 'Timeout su Bot B.', max(0.01, time.perf_counter() - started)
-        except (UserIsBlockedError, ChatWriteForbiddenError):
-            return 'Bot B bloccato o non scrivibile.', max(0.01, time.perf_counter() - started)
-        except FloodWaitError as exc:
-            return f'Flood wait Bot B: {exc.seconds}s.', max(0.01, time.perf_counter() - started)
-        except Exception as exc:  # noqa: BLE001
-            return f'Errore Bot B: {exc}', max(0.01, time.perf_counter() - started)
 
     @staticmethod
     def _is_terminal_bot_b_message(text: str) -> bool:
