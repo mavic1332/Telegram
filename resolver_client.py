@@ -62,14 +62,40 @@ class ResolverClient:
         self._phone_cache: dict[str, str] = {}
         self._limited_until: dict[int, datetime] = {}
         self._last_rotation_at: Optional[float] = None
+        self._active_bot_b_started: Optional[float] = None
+        self._bot_b_pending: dict[int, tuple[asyncio.Future[Tuple[str, float]], Optional[Callable[[str], bool]], float, int]] = {}
+        self._bot_b_handlers: dict[int, Callable] = {}
 
     async def start(self) -> None:
         for idx, (client, phone) in enumerate(zip(self._clients, self.phones), start=1):
             await client.start(phone=phone)
             logging.info('[STATUS] Account %d initialized (%s).', idx, self.session_names[idx - 1])
 
+            async def on_new_message(event: events.NewMessage.Event, account_idx: int = idx) -> None:
+                pending = self._bot_b_pending.get(account_idx)
+                if not pending:
+                    return
+                future, predicate, started_at, bot_chat_id = pending
+                if future.done():
+                    return
+                text = (event.raw_text or '').strip()
+                if not text:
+                    return
+                if event.chat_id != bot_chat_id:
+                    return
+                if predicate and not predicate(text):
+                    return
+                logging.info('[LISTENER] Capturing response for @UniversalSearch on Account %d...', account_idx)
+                future.set_result((text, max(0.01, time.perf_counter() - started_at)))
+
+            self._bot_b_handlers[idx] = on_new_message
+            client.add_event_handler(on_new_message, events.NewMessage())
+
     async def stop(self) -> None:
-        for client in self._clients:
+        for idx, client in enumerate(self._clients, start=1):
+            handler = self._bot_b_handlers.get(idx)
+            if handler:
+                client.remove_event_handler(handler)
             await client.disconnect()
 
     async def fetch_info(self, target: str, mode: str = 'all', progress_cb: ProgressCb = None) -> RawBotResponses:
@@ -101,6 +127,7 @@ class ResolverClient:
         text_b, sec_b = ('Timeout su Bot B.', None)
         bot_b_terminal = False
         self._last_rotation_at = None
+        self._active_bot_b_started = started
         deadline = started + MAX_BOT_WAIT_S
         seen_rotation_at: Optional[float] = None
 
@@ -139,8 +166,10 @@ class ResolverClient:
                     if self._is_bot_b_error(text_b):
                         bot_b_terminal = True
 
-            rotation_grace = self._last_rotation_at is not None and (time.perf_counter() - self._last_rotation_at) < ROTATION_GRACE_S
-            if self._has_core_profile(profile) and not task_b.done() and not bot_b_terminal and not rotation_grace and elapsed >= PRIORITY_DELIVERY_S:
+            now_ts = time.perf_counter()
+            rotation_grace = self._last_rotation_at is not None and (now_ts - self._last_rotation_at) < ROTATION_GRACE_S
+            active_attempt_elapsed = now_ts - (self._active_bot_b_started or started)
+            if self._has_core_profile(profile) and not task_b.done() and not bot_b_terminal and not rotation_grace and active_attempt_elapsed >= PRIORITY_DELIVERY_S:
                 text_b = 'Timeout/limite Bot B: consegna prioritaria con dati Bot A.'
                 sec_b = max(0.01, elapsed)
                 bot_b_terminal = True
@@ -200,6 +229,7 @@ class ResolverClient:
 
         for pos, idx in enumerate(available, start=1):
             client = self._clients[idx]
+            self._active_bot_b_started = time.perf_counter()
             text, sec = await self._query_wow_with_client(client, idx + 1, target, progress_cb=progress_cb, profile_updater=profile_updater)
             if self._is_bot_b_error(text):
                 self._limited_until[idx] = datetime.utcnow() + timedelta(hours=LIMIT_HOURS)
@@ -225,14 +255,15 @@ class ResolverClient:
         started = time.perf_counter()
         try:
             entity = await client.get_entity(BOT_B)
+            loop = asyncio.get_running_loop()
+            done_future: asyncio.Future[Tuple[str, float]] = loop.create_future()
+            self._bot_b_pending[account_idx] = (done_future, self._is_terminal_bot_b_message, time.perf_counter(), entity.id)
+            logging.info('[LISTENER] Armed global listener for Account %d (chat=%s).', account_idx, entity.id)
             await client.send_message(entity, target)
-            text, sec_b = await self._listen_first_text(
-                client,
-                account_idx,
-                entity.id,
-                MAX_BOT_WAIT_S,
-                predicate=self._is_terminal_bot_b_message,
-            )
+            try:
+                text, sec_b = await asyncio.wait_for(done_future, timeout=MAX_BOT_WAIT_S)
+            finally:
+                self._bot_b_pending.pop(account_idx, None)
             parsed = self._apply_regex_enrichment('b', text)
             if profile_updater:
                 profile_updater('bot_b', parsed)
