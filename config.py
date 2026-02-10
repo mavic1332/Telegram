@@ -25,9 +25,8 @@ def _ensure_env_file() -> None:
         'API_ID=\n'
         'API_HASH=\n'
         'BOT_TOKEN=\n'
-        'PHONE=\n'
         'USERBOT_PHONES=\n'
-        'USERBOT_SESSIONS=\n'
+        'USERBOT_SESSIONS=sessions/acc1,sessions/acc2,sessions/acc3,sessions/acc4\n'
         'ADMIN_ID=\n',
         encoding='utf-8',
     )
@@ -37,11 +36,6 @@ def _prompt_for_key(values: Dict[str, str], key: str, prompt: str, required: boo
     current = (values.get(key) or '').strip()
     if current:
         return current
-
-    if key == 'PHONE' and values.get('PHONE_NUMBER'):
-        migrated = str(values['PHONE_NUMBER']).strip()
-        set_key(str(ENV_PATH), 'PHONE', migrated)
-        return migrated
 
     if not required:
         set_key(str(ENV_PATH), key, '')
@@ -56,11 +50,16 @@ def _prompt_for_key(values: Dict[str, str], key: str, prompt: str, required: boo
 
 
 def _split_csv(value: str) -> List[str]:
-    return [item.strip() for item in (value or '').split(',') if item.strip()]
+    items: List[str] = []
+    for raw in (value or '').split(','):
+        clean = raw.strip().strip('"\'').strip()
+        if clean:
+            items.append(clean)
+    return items
 
 
 def _normalize_sessions(raw_sessions: List[str], count: int) -> List[str]:
-    sessions = raw_sessions[:]
+    sessions = [s for s in raw_sessions if s]
     while len(sessions) < count:
         sessions.append(f'sessions/acc{len(sessions) + 1}')
     return sessions[:count]
@@ -76,18 +75,24 @@ def load_settings() -> Settings:
     bot_token = _prompt_for_key(values, 'BOT_TOKEN', 'Inserisci BOT_TOKEN')
     admin_id = _prompt_for_key(values, 'ADMIN_ID', 'Inserisci ADMIN_ID (opzionale)', required=False)
 
-    primary_phone = _prompt_for_key(values, 'PHONE', 'Inserisci PHONE principale (+39...)')
-
     phones_raw = _prompt_for_key(
         values,
         'USERBOT_PHONES',
-        'Inserisci USERBOT_PHONES (csv, es: +39111,+39222) - invio per usare PHONE',
+        'Inserisci USERBOT_PHONES (csv, es: +39111,+39222 oppure singolo +39111)',
         required=False,
     )
+
     userbot_phones = _split_csv(phones_raw)
+
+    # backward compatibility for old env files with PHONE / PHONE_NUMBER
+    legacy_phone = (values.get('PHONE') or values.get('PHONE_NUMBER') or '').strip().strip('"\'').strip()
+    if not userbot_phones and legacy_phone:
+        userbot_phones = [legacy_phone]
+        set_key(str(ENV_PATH), 'USERBOT_PHONES', legacy_phone)
+
     if not userbot_phones:
-        userbot_phones = [primary_phone]
-        set_key(str(ENV_PATH), 'USERBOT_PHONES', primary_phone)
+        single = _prompt_for_key(values, 'USERBOT_PHONES', 'Inserisci almeno un numero (+39...)', required=True)
+        userbot_phones = _split_csv(single)
 
     sessions_raw = _prompt_for_key(
         values,
