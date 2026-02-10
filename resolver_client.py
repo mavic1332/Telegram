@@ -20,6 +20,7 @@ PRIORITY_DELIVERY_S = 15
 LIMIT_HOURS = 12
 ROTATION_COOLDOWN_S = 2
 ROTATION_GRACE_S = 8
+ROTATION_EXTENSION_S = 15
 WAIT_UNTIL_RE = re.compile(r'new\s+requests\s+will\s+be\s+granted\s+at\s*(\d{1,2}:\d{2})', re.IGNORECASE)
 COUNTDOWN_RE = re.compile(r'\b(\d{2}:\d{2})\b')
 ProgressCb = Optional[Callable[[str], Awaitable[None]]]
@@ -100,6 +101,8 @@ class ResolverClient:
         text_b, sec_b = ('Timeout su Bot B.', None)
         bot_b_terminal = False
         self._last_rotation_at = None
+        deadline = started + MAX_BOT_WAIT_S
+        seen_rotation_at: Optional[float] = None
 
         while True:
             elapsed = time.perf_counter() - started
@@ -110,6 +113,16 @@ class ResolverClient:
                 pending_names.append('Bot B')
             if pending_names:
                 logging.info('[WAITING] for %s... (%.1fs elapsed)', ' and '.join(pending_names), elapsed)
+
+            if self._last_rotation_at and self._last_rotation_at != seen_rotation_at:
+                seen_rotation_at = self._last_rotation_at
+                deadline = max(deadline, seen_rotation_at + ROTATION_EXTENSION_S)
+                logging.info('[ROTATION] Timeout esteso: deadline aggiornata (+%ss per account attivo).', ROTATION_EXTENSION_S)
+
+            if self._has_core_profile(profile) and not task_a.done():
+                task_a.cancel()
+                sec_a = sec_a or max(0.01, elapsed)
+                logging.info('[STATUS] Bot A completo (ID+Telefono). Focus su Bot B/rotazione.')
 
             done, _ = await asyncio.wait({task_a, task_b}, timeout=1, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
@@ -136,7 +149,7 @@ class ResolverClient:
             if task_a.done() and (task_b.done() or bot_b_terminal):
                 break
 
-            if elapsed >= MAX_BOT_WAIT_S:
+            if time.perf_counter() >= deadline:
                 if not task_a.done():
                     task_a.cancel()
                     sec_a = max(0.01, elapsed)
@@ -187,7 +200,7 @@ class ResolverClient:
 
         for pos, idx in enumerate(available, start=1):
             client = self._clients[idx]
-            text, sec = await self._query_wow_with_client(client, target, progress_cb=progress_cb, profile_updater=profile_updater)
+            text, sec = await self._query_wow_with_client(client, idx + 1, target, progress_cb=progress_cb, profile_updater=profile_updater)
             if self._is_bot_b_error(text):
                 self._limited_until[idx] = datetime.utcnow() + timedelta(hours=LIMIT_HOURS)
                 if pos < len(available):
@@ -204,6 +217,7 @@ class ResolverClient:
     async def _query_wow_with_client(
         self,
         client: TelegramClient,
+        account_idx: int,
         target: str,
         progress_cb: ProgressCb = None,
         profile_updater: ProfileUpdater = None,
@@ -212,7 +226,13 @@ class ResolverClient:
         try:
             entity = await client.get_entity(BOT_B)
             await client.send_message(entity, target)
-            text, sec_b = await self._listen_first_text(client, entity.id, MAX_BOT_WAIT_S, predicate=self._is_terminal_bot_b_message)
+            text, sec_b = await self._listen_first_text(
+                client,
+                account_idx,
+                entity.id,
+                MAX_BOT_WAIT_S,
+                predicate=self._is_terminal_bot_b_message,
+            )
             parsed = self._apply_regex_enrichment('b', text)
             if profile_updater:
                 profile_updater('bot_b', parsed)
@@ -240,6 +260,7 @@ class ResolverClient:
     async def _listen_first_text(
         self,
         client: TelegramClient,
+        account_idx: int,
         chat_id: int,
         timeout: int,
         predicate: Optional[Callable[[str], bool]] = None,
@@ -257,11 +278,13 @@ class ResolverClient:
             done_future.set_result((text, max(0.01, time.perf_counter() - start)))
 
         event_filter = events.NewMessage(chats=[chat_id])
+        logging.info('[LISTENER] Attach Bot B listener on Account %d (chat=%s).', account_idx, chat_id)
         client.add_event_handler(on_new_message, event_filter)
         try:
             return await asyncio.wait_for(done_future, timeout=timeout)
         finally:
             client.remove_event_handler(on_new_message, event_filter)
+            logging.info('[LISTENER] Detach Bot B listener on Account %d.', account_idx)
 
     async def _query_botfind(
         self,
